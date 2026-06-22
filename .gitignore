@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Protocol data (user sessions)
+protocol/
+.duo_hub/
+
+# Env
+.env
+*.env
+
+# Config with personal paths
+config.local.json
+
+# Temp files
+*.tmp
+*.log
+inbox/_claude_stdin_*.txt
+inbox/_lobster_prompt.txt
+inbox/_claude_prompt.txt

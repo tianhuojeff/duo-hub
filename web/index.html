@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Duo Hub — 双AI协作中心</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="logo">⚡ Duo Hub</span>
+    <span class="subtitle">双AI协作中心</span>
+  </div>
+  <div class="topbar-right">
+    <span id="gw-ccmr" class="gw-indicator" title="ccmr 网关">🔵 ccmr</span>
+    <span id="gw-lobster" class="gw-indicator" title="OpenClaw 网关">🦞 龙虾</span>
+    <span class="session-badge" id="session-id">会话 #---</span>
+  </div>
+</header>
+
+<div class="main-grid">
+
+  <!-- Claude 面板 -->
+  <section class="ai-panel claude-panel" id="claude-panel">
+    <div class="panel-header">
+      <span class="ai-icon">🔵</span>
+      <span class="ai-name">Claude Code</span>
+      <select class="model-select" id="claude-model" title="切换模型">
+        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+        <option value="kimi-k2.6">Kimi K2.6</option>
+        <option value="minimax-m3">MiniMax M3</option>
+        <option value="qwen3.5-plus">Qwen3.5 Plus</option>
+        <option value="glm-5.1">GLM-5.1</option>
+        <option value="step-3.7-flash">Step 3.7 Flash</option>
+      </select>
+      <span class="ai-status" id="claude-status-badge" data-status="idle">空闲</span>
+    </div>
+    <div class="panel-body" id="claude-output">
+      <div class="placeholder">等待任务提交…</div>
+    </div>
+    <div class="panel-footer">
+      <span class="elapsed" id="claude-elapsed"></span>
+    </div>
+  </section>
+
+  <!-- 龙虾面板 -->
+  <section class="ai-panel lobster-panel" id="lobster-panel">
+    <div class="panel-header">
+      <span class="ai-icon">🦞</span>
+      <span class="ai-name">龙虾</span>
+      <select class="model-select lobster-select" id="lobster-model" title="切换模型">
+        <option value="">默认 (GPT-5.5)</option>
+        <option value="deepseek/deepseek-v4-flash">DeepSeek V4 Flash ⚡便宜</option>
+        <option value="dmxapi/gpt-4.1-mini">GPT 4.1 Mini</option>
+        <option value="bailian/qwen-coder-plus">Qwen Coder Plus</option>
+        <option value="bailian/qwen-plus">Qwen Plus</option>
+      </select>
+      <span class="ai-status" id="lobster-status-badge" data-status="idle">空闲</span>
+    </div>
+    <div class="panel-body" id="lobster-output">
+      <div class="placeholder">等待任务提交…</div>
+    </div>
+    <div class="panel-footer">
+      <span class="elapsed" id="lobster-elapsed"></span>
+    </div>
+  </section>
+
+</div>
+
+<!-- 对话历史 -->
+<section class="chat-section">
+  <div class="section-label">📜 对话记录</div>
+  <div class="chat-messages" id="chat-messages">
+    <div class="chat-empty">输入你的需求，两个 AI 将同时响应…</div>
+  </div>
+</section>
+
+<!-- 输入区域 -->
+<footer class="input-area">
+  <!-- 确认操作栏 (pending_confirmation 时显示) -->
+  <div class="confirm-bar" id="confirm-bar" style="display:none">
+    <span class="confirm-icon">📋</span>
+    <span class="confirm-text">协商完成，请确认分工方案：</span>
+    <button class="btn btn-confirm" id="btn-confirm">✅ 确认分工</button>
+    <button class="btn btn-renegotiate" id="btn-renegotiate">🔄 重新协商</button>
+  </div>
+
+  <!-- 分工结果统一展示区 -->
+  <div class="division-result" id="division-result" style="display:none">
+    <div class="division-header">🤝 协商分工结果</div>
+    <div class="division-body" id="division-body"></div>
+  </div>
+
+  <div class="input-row">
+    <textarea
+      id="task-input"
+      placeholder="📝 输入你的需求… (Ctrl+Enter 发送)"
+      rows="2"
+    ></textarea>
+    <div class="btn-group">
+      <label class="checkbox-label" title="勾选后两个AI会自动协商分工">
+        <input type="checkbox" id="chk-division"> 🤝 需要分工
+      </label>
+      <button class="btn btn-primary" id="btn-send" title="发送任务 (Ctrl+Enter)">
+        🚀 发送
+      </button>
+    </div>
+  </div>
+  <div class="action-row">
+    <button class="btn btn-sm btn-stop" id="btn-stop">⏹ 重置会话</button>
+    <span class="phase-indicator" id="phase-text">就绪</span>
+  </div>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
