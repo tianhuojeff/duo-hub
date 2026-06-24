@@ -24,6 +24,9 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
+APP_VERSION = "0.4.0"
+GATEWAY_CACHE_TTL = int(os.environ.get("DUO_GATEWAY_CACHE_TTL", "30"))
+GATEWAY_CHECK_TIMEOUT = float(os.environ.get("DUO_GATEWAY_CHECK_TIMEOUT", "1"))
 
 def _load_config():
     """加载配置，优先环境变量，其次 config.local.json/config.json，最后自动检测"""
@@ -160,6 +163,7 @@ if _oc_node_paths:
 class DuoHub:
     def __init__(self):
         self.lock = threading.Lock()
+        self._gateway_lock = threading.Lock()
         self._gateway_cache = None
         self._gateway_cache_at = 0
         self._ensure_dirs()
@@ -238,21 +242,31 @@ class DuoHub:
     # ---- 网关检测 ----
     def check_gateways(self):
         now = time.time()
-        if self._gateway_cache and now - self._gateway_cache_at < 5:
+        if self._gateway_cache and now - self._gateway_cache_at < GATEWAY_CACHE_TTL:
             return self._gateway_cache
 
-        self._gateway_cache = {
-            "ccmr": self._port_open(CCMR_PORT),
-            "openclaw": self._port_open(OPENCLAW_PORT),
-            "codex": self._codex_available(),
-        }
-        self._gateway_cache_at = now
-        return self._gateway_cache
+        if not self._gateway_lock.acquire(blocking=False):
+            return self._gateway_cache or {"ccmr": False, "openclaw": False, "codex": False}
+
+        try:
+            now = time.time()
+            if self._gateway_cache and now - self._gateway_cache_at < GATEWAY_CACHE_TTL:
+                return self._gateway_cache
+
+            self._gateway_cache = {
+                "ccmr": self._port_open(CCMR_PORT),
+                "openclaw": self._port_open(OPENCLAW_PORT),
+                "codex": self._codex_available(),
+            }
+            self._gateway_cache_at = now
+            return self._gateway_cache
+        finally:
+            self._gateway_lock.release()
 
     @staticmethod
     def _port_open(port):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(1)
+        s.settimeout(GATEWAY_CHECK_TIMEOUT)
         try:
             s.connect(("127.0.0.1", port))
             s.close()
@@ -267,7 +281,7 @@ class DuoHub:
                 _codex_cmd_parts() + ["--version"],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=GATEWAY_CHECK_TIMEOUT,
                 encoding="utf-8",
                 errors="replace",
                 env=_ENV,
@@ -674,6 +688,80 @@ class DuoHub:
         recent = self.get_recent_messages(n)
         return "\n\n".join([f"[{AI_LABELS.get(m['role'], m['role'])}]: {m['content']}" for m in recent])
 
+    @staticmethod
+    def _parse_division_plan(text):
+        """从 Codex 的 Markdown 分工提案中提取三方任务。"""
+        if not text:
+            return None
+        plan = {ai: "" for ai in AI_ORDER}
+        aliases = {
+            "claude": ["Claude", "Claude Code", "克劳德"],
+            "lobster": ["龙虾", "OpenClaw", "小八", "Lobster"],
+            "codex": ["Codex"],
+        }
+        lines = text.splitlines()
+        for idx, line in enumerate(lines):
+            stripped = line.strip().lstrip("-*0123456789.、 \t")
+            for ai, names in aliases.items():
+                if plan[ai]:
+                    continue
+                for name in names:
+                    prefixes = [f"{name}负责", f"{name} 负责", f"{name}：", f"{name}:"]
+                    if any(stripped.startswith(prefix) for prefix in prefixes):
+                        content = stripped
+                        for marker in ["负责：", "负责:", "：", ":"]:
+                            if marker in content:
+                                content = content.split(marker, 1)[1].strip()
+                                break
+                        extra = []
+                        for follow in lines[idx + 1: idx + 8]:
+                            f = follow.strip()
+                            if not f:
+                                if extra:
+                                    break
+                                continue
+                            if any(token in f for token in ["Claude负责", "Claude 负责", "龙虾负责", "龙虾 负责", "Codex负责", "Codex 负责"]):
+                                break
+                            if f.startswith(("#", "---")):
+                                break
+                            extra.append(f)
+                        plan[ai] = "\n".join([content] + extra).strip()
+                        break
+        return plan if any(plan.values()) else None
+
+    def _store_division_from_latest_codex(self):
+        for msg in reversed(self.chat.get("messages", [])):
+            if msg.get("role") == "codex":
+                plan = self._parse_division_plan(msg.get("content", ""))
+                if plan:
+                    self.session["_division_plan"] = plan
+                    self.session["_division_text"] = msg.get("content", "")
+                    self.session["_division_source_msg"] = msg.get("id")
+                    self._save_session()
+                return plan
+        return None
+
+    @staticmethod
+    def _agent_agreement_state(text):
+        if not text:
+            return "silent"
+        lowered = text.lower()
+        negative = [
+            "不同意", "不行", "不能", "做不到", "不可行", "需要调整", "必须调整",
+            "建议调整", "有问题", "不合理", "不建议", "不适合", "无法", "缺少",
+            "不可以", "不确认", "反对", "担心", "但是", "但需要", "不过需要",
+            "需要先确认", "请确认", "选哪个", "是否", "?", "？",
+        ]
+        positive = ["同意分工", "同意", "确认", "没问题", "没有问题", "可以", "ok", "好的", "就这样"]
+        for kw in [n.lower() for n in negative]:
+            if kw == "有问题" and ("没有问题" in lowered or "没问题" in lowered):
+                continue
+            if kw in lowered:
+                return "disagree"
+        if any(kw in lowered for kw in positive):
+            return "agree"
+        return "unclear"
+
     def _start_agent(self, ai, task_text, mode="task"):
         model = self.session.get(f"{ai}_model", "")
         target = {
@@ -685,7 +773,7 @@ class DuoHub:
 
     def process_task(self, task_text, needs_division=False):
         """提交任务：同时启动三个 AI。"""
-        if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "executing"):
+        if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing"):
             return False, "已有任务正在处理中"
 
         self.session["round"] += 1
@@ -736,6 +824,7 @@ class DuoHub:
             if stage in ("codex_proposes", "codex_adjusts"):
                 self._collect_if_done("codex")
                 if self.is_done("codex") and self.session.get("_codex_collected") == self.session["round"]:
+                    self._store_division_from_latest_codex()
                     self._negotiate_peers_respond()
 
             elif stage == "peers_confirm":
@@ -743,15 +832,32 @@ class DuoHub:
                     self._collect_if_done(ai)
 
                 if self._all_done(("claude", "lobster")):
-                    peer_texts = [self.read_outbox("claude") or "", self.read_outbox("lobster") or ""]
-                    peers_agreed = all(self._agent_agreed(text) for text in peer_texts)
+                    peer_states = {
+                        "claude": self._agent_agreement_state(self.read_outbox("claude") or ""),
+                        "lobster": self._agent_agreement_state(self.read_outbox("lobster") or ""),
+                    }
+                    self.session["_peer_feedback"] = {
+                        "claude": self.read_outbox("claude") or "",
+                        "lobster": self.read_outbox("lobster") or "",
+                        "states": peer_states,
+                    }
+                    peers_agreed = all(state == "agree" for state in peer_states.values())
                     neg_rounds = self.session.get("_neg_rounds", 0) + 1
                     self.session["_neg_rounds"] = neg_rounds
 
-                    if peers_agreed or neg_rounds >= 3:
+                    if peers_agreed:
                         self.session["phase"] = "pending_confirmation"
-                        msg = "✅ 三方协商完成！请确认分工。" if peers_agreed else "⚠️ 已达最大协商轮次，请确认当前方案。"
+                        self.session["_division_status"] = "agreed"
+                        msg = "✅ 三方已一致同意分工。请确认执行，或输入修改意见继续调整。"
                         self.add_message("system", msg)
+                        self._save_session()
+                    elif neg_rounds >= 3:
+                        self.session["phase"] = "awaiting_feedback"
+                        self.session["_division_status"] = "needs_user"
+                        self.add_message(
+                            "system",
+                            "⚠️ 三方未达成一致，已暂停自动协商。请补充你的意见、继续协商、强制确认当前方案，或取消分工。"
+                        )
                         self._save_session()
                     else:
                         self._negotiate_codex_adjust()
@@ -765,9 +871,10 @@ class DuoHub:
                 self.add_message("system", "🎉 三方执行完毕！请在面板中查看各自成果。")
                 self._save_session()
 
-    def _auto_negotiate(self):
+    def _auto_negotiate(self, user_feedback=""):
         """Codex 先汇总三方初步意见并提出三方分工。"""
         context_str = self._format_recent(20)
+        feedback_block = f"\n\n## 天火大人的补充意见\n\n{user_feedback}\n" if user_feedback else ""
 
         self.session["round"] += 1
         self.session["phase"] = "negotiating"
@@ -784,14 +891,14 @@ class DuoHub:
 
         prompt = (
             "## 协商分工 - Codex 汇总提案\n\n"
-            "请阅读 Claude、龙虾和 Codex 的初步回复，提出一个明确的三方分工。\n"
+            "请阅读 Claude、龙虾和 Codex 的初步回复，以及天火大人的补充意见，提出一个明确的三方分工。\n"
             "必须包含：\n"
             "- Claude负责：[具体、可执行]\n"
             "- 龙虾负责：[具体、可执行]\n"
             "- Codex负责：[具体、可执行]\n"
             "规则：责任边界清晰，不重复安排同一件事；如果某方能力明显不适合，就把它安排到更适合的支持/审查/资料任务。\n"
             "回复使用中文。\n\n"
-            f"---\n{context_str}"
+            f"{feedback_block}\n---\n{context_str}"
         )
         self.write_inbox(prompt)
         self._start_agent("codex", prompt, "negotiate")
@@ -844,25 +951,31 @@ class DuoHub:
         self.write_inbox(prompt)
         self._start_agent("codex", prompt, "negotiate")
 
-    @staticmethod
-    def _agent_agreed(text):
-        if not text:
-            return False
-        positive = ["同意分工", "同意", "确认", "没问题", "可以", "OK", "ok", "好的", "就这样"]
-        negative = ["不同意", "不行", "不能", "做不到", "不可行", "需要调整", "必须调整", "建议调整"]
-        return any(kw in text for kw in positive) and not any(kw in text for kw in negative)
-
-    def negotiate(self):
+    def negotiate(self, user_feedback=""):
         """手动触发重新协商。"""
-        if self.session["phase"] not in ("awaiting_user", "pending_confirmation", "done"):
+        if self.session["phase"] not in ("awaiting_user", "pending_confirmation", "awaiting_feedback", "done"):
             return False, "当前阶段不能发起协商"
 
-        self._auto_negotiate()
+        if user_feedback:
+            self.add_message("user", f"【协商补充意见】{user_feedback}")
+        self._auto_negotiate(user_feedback=user_feedback)
+        return True, "ok"
+
+    def cancel_division(self, user_note=""):
+        """取消当前分工确认，回到可继续输入状态。"""
+        if self.session["phase"] not in ("pending_confirmation", "awaiting_feedback"):
+            return False, "当前阶段不能取消分工"
+        if user_note:
+            self.add_message("user", f"【取消分工说明】{user_note}")
+        self.session["phase"] = "awaiting_user"
+        self.session["_division_status"] = "cancelled"
+        self.add_message("system", "↩ 已取消当前分工确认，可继续输入新需求或补充说明。")
+        self._save_session()
         return True, "ok"
 
     def confirm_plan(self):
         """用户确认分工方案 → 三方分别执行。"""
-        if self.session["phase"] != "pending_confirmation":
+        if self.session["phase"] not in ("pending_confirmation", "awaiting_feedback"):
             return False, "没有待确认的分工方案"
 
         self.session["round"] += 1
@@ -871,10 +984,14 @@ class DuoHub:
         for ai in AI_ORDER:
             self.session[f"{ai}_status"] = "working"
             self.session[f"_{ai}_collected"] = 0
-        self.add_message("system", "✅ 天火大人已确认分工！三方开始执行各自任务…")
+        if self.session.get("_division_status") == "needs_user":
+            self.add_message("system", "✅ 天火大人已强制确认当前分工！三方开始执行各自任务…")
+        else:
+            self.add_message("system", "✅ 天火大人已确认分工！三方开始执行各自任务…")
         self._save_session()
 
         all_context = self._format_recent(30)
+        division_plan = self.session.get("_division_plan") or {}
         shared_task = (
             "## 执行阶段 - 三方共享上下文\n\n"
             "分工方案已经天火大人确认。每个 AI 只执行明确标注给自己的部分：\n"
@@ -887,9 +1004,11 @@ class DuoHub:
         self.write_inbox(shared_task)
 
         for ai in AI_ORDER:
+            assigned = division_plan.get(ai, "")
             agent_task = (
                 f"## 执行阶段 - {AI_LABELS[ai]}\n\n"
-                f"分工已确认。你是 {AI_LABELS[ai]}，只执行对话中标注给你的部分。"
+                f"分工已确认。你是 {AI_LABELS[ai]}，只执行下面明确分配给你的部分。\n\n"
+                f"## 你负责的任务\n\n{assigned or '未解析到结构化任务，请只根据最近分工中明确标注给你的部分执行。'}\n\n"
                 "直接动手执行，完成后报告。不要泄露密钥或私人凭据。\n\n"
                 f"---\n{all_context}"
             )
@@ -934,17 +1053,10 @@ class DuoHub:
         messages = self.chat.get("messages", [])
         recent = messages[-30:] if len(messages) > 30 else messages
 
-        # 提取协商结果（如果有）
-        division = None
-        if self.session["phase"] in ("pending_confirmation", "executing", "done"):
-            neg_round = self.session.get("_negotiate_round")
-            if neg_round:
-                division = {ai: "" for ai in AI_ORDER}
-                for m in messages:
-                    if m.get("round") == neg_round and m.get("role") in AI_ORDER:
-                        division[m["role"]] = m.get("content", "")
-                if not any(division.values()):
-                    division = None
+        # 提取结构化协商结果（如果有）
+        division = self.session.get("_division_plan")
+        if division and not any((division.get(ai) or "").strip() for ai in AI_ORDER):
+            division = None
 
         agents = [
             {
@@ -957,6 +1069,7 @@ class DuoHub:
         ]
 
         return {
+            "version": APP_VERSION,
             "session_id": self.session["session_id"],
             "phase": self.session["phase"],
             "round": self.session["round"],
@@ -972,6 +1085,8 @@ class DuoHub:
             "messages": recent,
             "total_messages": len(messages),
             "division": division,
+            "division_status": self.session.get("_division_status", ""),
+            "peer_feedback": self.session.get("_peer_feedback", {}),
             "created_at": self.session["created_at"],
         }
 
@@ -1038,7 +1153,22 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
                 self._serve_json({"error": task_id}, 409)
 
         elif path == "/api/negotiate":
-            ok, msg = hub.negotiate()
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                data = {}
+            ok, msg = hub.negotiate(user_feedback=(data.get("feedback", "") or "").strip())
+            if ok:
+                self._serve_json({"ok": True})
+            else:
+                self._serve_json({"error": msg}, 409)
+
+        elif path == "/api/cancel-division":
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                data = {}
+            ok, msg = hub.cancel_division(user_note=(data.get("note", "") or "").strip())
             if ok:
                 self._serve_json({"ok": True})
             else:

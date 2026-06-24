@@ -23,10 +23,14 @@ const elTaskInput = $("#task-input");
 const elBtnSend = $("#btn-send");
 const elBtnStop = $("#btn-stop");
 const elBtnConfirm = $("#btn-confirm");
+const elBtnFeedback = $("#btn-feedback");
 const elBtnRenegotiate = $("#btn-renegotiate");
+const elBtnCancelDivision = $("#btn-cancel-division");
 const elConfirmBar = $("#confirm-bar");
+const elConfirmText = $("#confirm-text");
 const elPhaseText = $("#phase-text");
 const elSessionId = $("#session-id");
+const elAppVersion = $("#app-version");
 const elGwCcmr = $("#gw-ccmr");
 const elGwLobster = $("#gw-lobster");
 const elGwCodex = $("#gw-codex");
@@ -60,6 +64,7 @@ const PHASE_LABELS = {
   ai_working: "⚡ AI 分析中…",
   negotiating: "🤝 自动协商中…",
   pending_confirmation: "📋 等待确认分工",
+  awaiting_feedback: "⚠️ 等待你裁决分工",
   executing: "🔨 三方执行中…",
   done: "🎉 全部完成！",
   awaiting_user: "就绪 — 可继续输入需求",
@@ -92,8 +97,23 @@ async function confirmPlan() {
   return true;
 }
 
-async function triggerNegotiate() {
-  const res = await fetch("/api/negotiate", { method: "POST" });
+async function triggerNegotiate(feedback = "") {
+  const res = await fetch("/api/negotiate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ feedback }),
+  });
+  const data = await res.json();
+  if (!res.ok) { alert("错误: " + (data.error || "未知错误")); return false; }
+  return true;
+}
+
+async function cancelDivision(note = "") {
+  const res = await fetch("/api/cancel-division", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ note }),
+  });
   const data = await res.json();
   if (!res.ok) { alert("错误: " + (data.error || "未知错误")); return false; }
   return true;
@@ -120,6 +140,7 @@ function updateUI(data) {
 
   updateGatewayIndicators(data.gateways);
   if (data.session_id) elSessionId.textContent = "会话 " + data.session_id.slice(-8);
+  if (data.version && elAppVersion) elAppVersion.textContent = "v" + data.version;
 
   // 阶段变化
   if (data.phase !== prevPhase) {
@@ -151,7 +172,7 @@ function updateUI(data) {
   if (data.messages) renderAIPanels(data.messages);
 
   // 分工结果统一展示
-  if (data.division && (data.phase === "pending_confirmation" || data.phase === "executing" || data.phase === "done")) {
+  if (data.division && (data.phase === "pending_confirmation" || data.phase === "awaiting_feedback" || data.phase === "executing" || data.phase === "done")) {
     const divEl = document.getElementById("division-result");
     const bodyEl = document.getElementById("division-body");
     let html = "";
@@ -164,6 +185,19 @@ function updateUI(data) {
     if (data.division.codex) {
       html += '<div class="division-item" style="margin-top:8px"><strong>🟢 Codex 负责:</strong><br>' + renderMarkdown(data.division.codex) + '</div>';
     }
+    const peerFeedback = data.peer_feedback || {};
+    const peerStates = peerFeedback.states || {};
+    const needsReview = data.phase === "awaiting_feedback" || data.division_status === "needs_user";
+    if (needsReview && (peerFeedback.claude || peerFeedback.lobster)) {
+      html += '<div class="division-review"><strong>⚠️ 分歧/待裁决:</strong>';
+      if (peerFeedback.claude) {
+        html += '<div style="margin-top:6px"><span>🔵 Claude: ' + escapeHtml(peerStates.claude || "unknown") + '</span><br>' + renderMarkdown(peerFeedback.claude) + '</div>';
+      }
+      if (peerFeedback.lobster) {
+        html += '<div style="margin-top:6px"><span>🦞 龙虾: ' + escapeHtml(peerStates.lobster || "unknown") + '</span><br>' + renderMarkdown(peerFeedback.lobster) + '</div>';
+      }
+      html += '</div>';
+    }
     bodyEl.innerHTML = html || '<em>协商中…</em>';
     divEl.style.display = "block";
   } else {
@@ -173,12 +207,22 @@ function updateUI(data) {
 
 function handlePhaseChange(newPhase, prevPhase) {
   // 进入确认阶段
-  if (newPhase === "pending_confirmation") {
+  if (newPhase === "pending_confirmation" || newPhase === "awaiting_feedback") {
     elConfirmBar.style.display = "flex";
+    if (newPhase === "awaiting_feedback") {
+      elConfirmText.textContent = "三方未达成一致：输入你的裁决/修改意见，或选择下一步。";
+      elBtnConfirm.textContent = "✅ 仍确认执行";
+      elTaskInput.placeholder = "写给三方的补充意见，例如：按龙虾意见改，Claude 只负责合成，Codex 负责检查…";
+    } else {
+      elConfirmText.textContent = "三方已同意分工：可确认执行，也可输入修改意见。";
+      elBtnConfirm.textContent = "✅ 确认执行";
+      elTaskInput.placeholder = "可选：输入修改意见后点“按输入修改”…";
+    }
   }
   // 离开确认阶段
-  if (prevPhase === "pending_confirmation" && newPhase !== "pending_confirmation") {
+  if ((prevPhase === "pending_confirmation" || prevPhase === "awaiting_feedback") && newPhase !== "pending_confirmation" && newPhase !== "awaiting_feedback") {
     elConfirmBar.style.display = "none";
+    elTaskInput.placeholder = "📝 输入你的需求… (Ctrl+Enter 发送)";
   }
   // 进入工作阶段 → 清空面板
   if (newPhase === "ai_working" && prevPhase !== "negotiating") {
@@ -229,10 +273,10 @@ function updateStatusBadges(data) {
 }
 
 function updateButtonStates() {
-  const working = state.phase === "ai_working" || state.phase === "negotiating";
-  const confirming = state.phase === "pending_confirmation";
+  const working = state.phase === "ai_working" || state.phase === "negotiating" || state.phase === "executing";
+  const deciding = state.phase === "pending_confirmation" || state.phase === "awaiting_feedback";
   elBtnSend.disabled = working;
-  elBtnSend.textContent = working ? "⏳ 处理中…" : "🚀 发送";
+  elBtnSend.textContent = working ? "⏳ 处理中…" : deciding ? "✏️ 提交意见" : "🚀 发送";
   elTaskInput.disabled = working;
   // 模型选择框在 AI 工作中也可切换（下次生效）
 }
@@ -346,6 +390,21 @@ function truncate(text, maxLen) {
 // === 事件 ===
 elBtnSend.addEventListener("click", async () => {
   const text = elTaskInput.value.trim();
+  const decisionPhase = state.phase === "pending_confirmation" || state.phase === "awaiting_feedback";
+  if (decisionPhase) {
+    if (!text) {
+      alert("先在输入框写你的修改意见，再提交。");
+      return;
+    }
+    if (await triggerNegotiate(text)) {
+      elTaskInput.value = "";
+      lastMsgCount = 0;
+      taskStartTime = Date.now();
+      startElapsedTimer();
+      fetchState();
+    }
+    return;
+  }
   if (!text) return;
   const needsDivision = document.getElementById("chk-division").checked;
   if (await submitTask(text, needsDivision)) {
@@ -367,14 +426,41 @@ elBtnConfirm.addEventListener("click", async () => {
   }
 });
 
-elBtnRenegotiate.addEventListener("click", async () => {
-  if (await triggerNegotiate()) {
+elBtnFeedback.addEventListener("click", async () => {
+  const feedback = elTaskInput.value.trim();
+  if (!feedback) {
+    alert("先在输入框写清楚你要怎么改分工。");
+    elTaskInput.focus();
+    return;
+  }
+  if (await triggerNegotiate(feedback)) {
+    elTaskInput.value = "";
     lastMsgCount = 0;
+    taskStartTime = Date.now();
+    startElapsedTimer();
+    fetchState();
+  }
+});
+
+elBtnRenegotiate.addEventListener("click", async () => {
+  const feedback = elTaskInput.value.trim();
+  if (await triggerNegotiate(feedback)) {
+    lastMsgCount = 0;
+    elTaskInput.value = "";
     elClaudeOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
     elLobsterOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
     elCodexOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
     taskStartTime = Date.now();
     startElapsedTimer();
+    fetchState();
+  }
+});
+
+elBtnCancelDivision.addEventListener("click", async () => {
+  const note = elTaskInput.value.trim();
+  if (await cancelDivision(note)) {
+    elTaskInput.value = "";
+    elConfirmBar.style.display = "none";
     fetchState();
   }
 });

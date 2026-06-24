@@ -17,6 +17,7 @@
     <span id="gw-ccmr" class="gw-indicator" title="ccmr 网关">🔵 ccmr</span>
     <span id="gw-lobster" class="gw-indicator" title="OpenClaw 网关">🦞 龙虾</span>
     <span id="gw-codex" class="gw-indicator" title="Codex CLI">🟢 Codex</span>
+    <span class="version-badge" id="app-version">v---</span>
     <span class="session-badge" id="session-id">会话 #---</span>
   </div>
 </header>
@@ -123,9 +124,11 @@
   <!-- 确认操作栏 (pending_confirmation 时显示) -->
   <div class="confirm-bar" id="confirm-bar" style="display:none">
     <span class="confirm-icon">📋</span>
-    <span class="confirm-text">协商完成，请确认分工方案：</span>
-    <button class="btn btn-confirm" id="btn-confirm">✅ 确认分工</button>
-    <button class="btn btn-renegotiate" id="btn-renegotiate">🔄 重新协商</button>
+    <span class="confirm-text" id="confirm-text">协商完成，请确认分工方案：</span>
+    <button class="btn btn-confirm" id="btn-confirm">✅ 确认执行</button>
+    <button class="btn btn-feedback" id="btn-feedback">✏️ 按输入修改</button>
+    <button class="btn btn-renegotiate" id="btn-renegotiate">🔄 继续协商</button>
+    <button class="btn btn-cancel" id="btn-cancel-division">↩ 先不执行</button>
   </div>
 
   <!-- 分工结果统一展示区 -->
