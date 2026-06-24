@@ -886,7 +886,7 @@ function initEnergyFieldCanvas() {
     { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
     { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
     { key: "strategy", symbol: "St", label: "策略版本", type: "BACKTEST", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86, metric: "EVOLVE" },
-    { key: "github", symbol: "Gh", label: "GitHub v0.4.5", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
+    { key: "github", symbol: "Gh", label: "GitHub v0.4.6", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
     { key: "log", symbol: "Lg", label: "工作日志", type: "LOG", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8, metric: "TRACE" },
     { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
@@ -1154,15 +1154,17 @@ function initEnergyFieldCanvas() {
       drawSegmentedArc(core.x, core.y, radius, start + Math.PI, start + Math.PI * 1.52, "#38bdf8", 0.22 - i * 0.025, 1);
     }
 
-    ctx.globalCompositeOperation = "source-over";
-    ctx.fillStyle = "rgba(186, 230, 253, 0.9)";
-    ctx.font = `600 ${expanded ? "11px" : "8px"} ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-    ctx.textAlign = "center";
-    ctx.fillText("DUO CORE", core.x, core.y - 3);
-    ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
-    ctx.font = `500 ${expanded ? "9px" : "7px"} ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-    ctx.fillText(`v${state.version || "0.4.5"}`, core.x, core.y + (expanded ? 11 : 8));
-    ctx.textAlign = "start";
+    if (expanded) {
+      ctx.globalCompositeOperation = "source-over";
+      ctx.fillStyle = "rgba(186, 230, 253, 0.9)";
+      ctx.font = `600 11px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+      ctx.textAlign = "center";
+      ctx.fillText("DUO CORE", core.x, core.y - 3);
+      ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
+      ctx.font = `500 9px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+      ctx.fillText(`v${state.version || "0.4.6"}`, core.x, core.y + 11);
+      ctx.textAlign = "start";
+    }
   }
 
   function drawHologramSphere(now) {
@@ -1278,7 +1280,7 @@ function initEnergyFieldCanvas() {
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.4.5"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.4.6"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
@@ -1290,7 +1292,7 @@ function initEnergyFieldCanvas() {
     if (node.key === "codex") return state.codex_status || "idle";
     if (node.key === "tasks") return state.phase || "idle";
     if (node.key === "division") return state.division_status || "stable";
-    if (node.key === "github") return state.version || "0.4.5";
+    if (node.key === "github") return state.version || "0.4.6";
     return node.metric;
   }
 
@@ -1316,6 +1318,90 @@ function initEnergyFieldCanvas() {
       ctx.quadraticCurveTo(mx, my, b.x, b.y);
       ctx.stroke();
     });
+    ctx.restore();
+  }
+
+  function findHoveredNode(positions, padding = 18) {
+    if (!pointer.active) return null;
+    let nearest = null;
+    let nearestDistance = Infinity;
+    positions.forEach((item) => {
+      const d = Math.hypot(pointer.x - item.x, pointer.y - item.y);
+      if (d < item.radius + padding && d < nearestDistance) {
+        nearest = item;
+        nearestDistance = d;
+      }
+    });
+    return nearest;
+  }
+
+  function drawCompactStellarSystem(positions, now) {
+    hoveredSemantic = findHoveredNode(positions, 10);
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+
+    const orbitCount = 7;
+    for (let i = 0; i < orbitCount; i++) {
+      const radius = core.radius * (0.5 + i * 0.13);
+      const tilt = 0.28 + i * 0.05;
+      const angle = core.spin * (0.18 + i * 0.025) + i * 0.5;
+      ctx.strokeStyle = `rgba(125, 211, 252, ${0.12 - i * 0.01})`;
+      ctx.lineWidth = i % 3 === 0 ? 0.9 : 0.65;
+      ctx.beginPath();
+      ctx.ellipse(core.x, core.y, radius, radius * tilt, angle, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    positions.forEach((item, index) => {
+      const front = Math.max(0, Math.min(1, (item.scale - 0.82) / 0.42));
+      const hover = hoveredSemantic && hoveredSemantic.node.key === item.node.key;
+      const angle = Math.atan2(item.y - core.y, item.x - core.x);
+      const distance = Math.hypot(item.x - core.x, item.y - core.y);
+      const trailLength = hover ? 0.72 : 0.34 + front * 0.12;
+      ctx.globalAlpha = hover ? 0.42 : 0.16 + front * 0.1;
+      ctx.strokeStyle = item.node.glow;
+      ctx.lineWidth = hover ? 1.25 : 0.8;
+      ctx.beginPath();
+      ctx.arc(core.x, core.y, distance, angle - trailLength, angle + 0.04);
+      ctx.stroke();
+
+      const starRadius = (hover ? 3.8 : 2.1 + front * 1.7) * item.node.weight;
+      const glowRadius = starRadius * (hover ? 9 : 6.5);
+      const glow = ctx.createRadialGradient(item.x, item.y, 0, item.x, item.y, glowRadius);
+      glow.addColorStop(0, `${item.node.color}ff`);
+      glow.addColorStop(0.3, `${item.node.glow}aa`);
+      glow.addColorStop(1, `${item.node.glow}00`);
+      ctx.globalAlpha = hover ? 0.95 : 0.72 + front * 0.18;
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, glowRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = item.node.color;
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, starRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (hover || index % 3 === 0) {
+        const spike = starRadius * (hover ? 4.8 : 3.2);
+        ctx.globalAlpha = hover ? 0.82 : 0.38;
+        ctx.strokeStyle = item.node.color;
+        ctx.lineWidth = hover ? 1.2 : 0.75;
+        ctx.beginPath();
+        ctx.moveTo(item.x - spike, item.y);
+        ctx.lineTo(item.x + spike, item.y);
+        ctx.moveTo(item.x, item.y - spike);
+        ctx.lineTo(item.x, item.y + spike);
+        ctx.stroke();
+      }
+    });
+
+    ctx.globalAlpha = 0.24 + Math.sin(now * 0.003) * 0.04;
+    ctx.strokeStyle = "rgba(240, 251, 255, 0.7)";
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    ctx.arc(core.x, core.y, core.radius * 0.23, 0, Math.PI * 2);
+    ctx.stroke();
     ctx.restore();
   }
 
@@ -1492,19 +1578,7 @@ function initEnergyFieldCanvas() {
       const rect = nodeModuleMetrics(item);
       return { x: rect.x - 4, y: rect.y - 4, w: rect.w + 8, h: rect.h + 8 };
     });
-    hoveredSemantic = null;
-    if (pointer.active) {
-      let nearest = null;
-      let nearestDistance = Infinity;
-      positions.forEach((item) => {
-        const d = Math.hypot(pointer.x - item.x, pointer.y - item.y);
-        if (d < item.radius + 18 && d < nearestDistance) {
-          nearest = item;
-          nearestDistance = d;
-        }
-      });
-      hoveredSemantic = nearest;
-    }
+    hoveredSemantic = findHoveredNode(positions, 18);
 
     drawProjectionRays(positions, now);
     drawSemanticLinks(positions);
@@ -1563,7 +1637,7 @@ function initEnergyFieldCanvas() {
     const protocolRows = [
       { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
       { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },
-      { key: "BUILD", value: `v${state.version || "0.4.5"}`, color: "#e1e4ed", level: 0.84 },
+      { key: "BUILD", value: `v${state.version || "0.4.6"}`, color: "#e1e4ed", level: 0.84 },
     ];
     const systemRows = [
       { key: "MEMORY", value: "linked", color: "#a78bfa", level: 0.82 },
@@ -1630,8 +1704,12 @@ function initEnergyFieldCanvas() {
     drawCoreAura(now);
     drawDragTrail();
     const positions = getSemanticPositions(now);
-    drawSemanticNodes(positions, now);
-    drawExpandedConsole(positions, now);
+    if (isExpandedMap()) {
+      drawSemanticNodes(positions, now);
+      drawExpandedConsole(positions, now);
+    } else {
+      drawCompactStellarSystem(positions, now);
+    }
     drawForceField(now);
     drawPulses();
     ctx.globalAlpha = 1;
