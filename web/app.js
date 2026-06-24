@@ -886,7 +886,7 @@ function initEnergyFieldCanvas() {
     { key: "division", label: "协商分工", type: "Protocol", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92 },
     { key: "investment", label: "投资学习", type: "Learning", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86 },
     { key: "strategy", label: "策略版本", type: "Backtest", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86 },
-    { key: "github", label: "GitHub v0.4.2", type: "Version", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78 },
+    { key: "github", label: "GitHub v0.4.3", type: "Version", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78 },
     { key: "log", label: "工作日志", type: "Log", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8 },
     { key: "telegram", label: "TG 桥", type: "Bridge", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76 },
   ];
@@ -895,13 +895,6 @@ function initEnergyFieldCanvas() {
     ["codex", "division"], ["division", "claude"], ["division", "lobster"],
     ["memory", "tasks"], ["memory", "log"], ["investment", "strategy"],
     ["codex", "github"], ["tasks", "telegram"], ["codex", "memory"],
-  ];
-  const palette = [
-    { core: "#ffffff", glow: "#7dd3fc" },
-    { core: "#e0f2fe", glow: "#38bdf8" },
-    { core: "#dbeafe", glow: "#0ea5e9" },
-    { core: "#cffafe", glow: "#22d3ee" },
-    { core: "#f0fbff", glow: "#60a5fa" },
   ];
   const core = {
     x: 0,
@@ -932,7 +925,7 @@ function initEnergyFieldCanvas() {
   let dpr = 1;
   let lastTime = performance.now();
   let targetEnergy = 0.86;
-  let densityScale = 0.78;
+  let spreadScale = 1;
   let lastPinchDistance = null;
   let hoveredSemantic = null;
 
@@ -941,25 +934,11 @@ function initEnergyFieldCanvas() {
   }
 
   function desiredParticleCount() {
-    const expanded = isExpandedMap();
-    const baseCount = Math.max(96, Math.min(expanded ? 560 : 320, Math.floor((width * height) / 780)));
-    return Math.max(56, Math.round(baseCount * densityScale));
+    return 0;
   }
 
-  function syncParticleCount(force = false) {
-    const targetCount = desiredParticleCount();
-    if (force) {
-      particles.length = 0;
-      for (let i = 0; i < targetCount; i++) particles.push(makeParticle());
-      return;
-    }
-    if (particles.length < targetCount) {
-      const addCount = Math.min(48, targetCount - particles.length);
-      for (let i = 0; i < addCount; i++) particles.push(makeParticle());
-    } else if (particles.length > targetCount) {
-      const removeCount = Math.min(48, particles.length - targetCount);
-      particles.splice(Math.max(0, particles.length - removeCount), removeCount);
-    }
+  function syncParticleCount() {
+    particles.length = 0;
   }
 
   function resize() {
@@ -1005,61 +984,10 @@ function initEnergyFieldCanvas() {
     elGraphCanvas.style.height = "100%";
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const targetCount = desiredParticleCount();
-    if (changed) {
-      syncParticleCount(true);
-    } else if (Math.abs(particles.length - targetCount) > 10) {
-      syncParticleCount(false);
-    }
+    syncParticleCount();
     updateParticles(1, performance.now());
     draw(performance.now());
     return true;
-  }
-
-  function randomAnchor() {
-    const theta = Math.random() * Math.PI * 2;
-    const banded = Math.random() < 0.62;
-    const phi = banded ? Math.PI * 0.5 + (Math.random() - 0.5) * 0.92 : Math.acos(Math.random() * 2 - 1);
-    const shell = Math.random() < 0.74 ? 0.66 + Math.random() * 0.44 : 0.22 + Math.random() * 0.38;
-    const radius = core.radius * shell;
-    return {
-      x: Math.sin(phi) * Math.cos(theta) * radius,
-      y: Math.cos(phi) * radius * (banded ? 0.52 : 0.78),
-      z: Math.sin(phi) * Math.sin(theta) * radius,
-    };
-  }
-
-  function makeParticle() {
-    const anchor = randomAnchor();
-    const color = palette[Math.floor(Math.random() * palette.length)];
-    const lane = Math.floor(Math.random() * 6);
-    const orbitRadius = core.radius * (0.42 + lane * 0.105 + Math.random() * 0.08);
-    const orbitTilt = -0.62 + lane * 0.22 + (Math.random() - 0.5) * 0.16;
-    return {
-      ax: anchor.x,
-      ay: anchor.y,
-      az: anchor.z,
-      x: anchor.x,
-      y: anchor.y,
-      z: anchor.z,
-      vx: 0,
-      vy: 0,
-      vz: 0,
-      sx: core.x + anchor.x,
-      sy: core.y + anchor.y,
-      psx: core.x + anchor.x,
-      psy: core.y + anchor.y,
-      seed: Math.random() * 1000,
-      spin: 0.62 + lane * 0.045 + Math.random() * 0.1,
-      orbitPhase: Math.random() * Math.PI * 2,
-      orbitRadius,
-      orbitTilt,
-      orbitY: core.radius * (0.08 + Math.random() * 0.24),
-      orbitDepth: 0.68 + Math.random() * 0.42,
-      size: 0.48 + Math.random() * 1.32,
-      alpha: 0.34 + Math.random() * 0.34,
-      color,
-    };
   }
 
   function activePointer() {
@@ -1114,97 +1042,13 @@ function initEnergyFieldCanvas() {
     core.x += core.vx * dt;
     core.y += core.vy * dt;
 
-    const targetCompression = pointer.down ? 0.56 : pointer.active ? 0.73 : 1;
+    const targetCompression = pointer.down ? 0.82 : pointer.active ? 0.9 : 1;
     core.compression += (targetCompression - core.compression) * 0.055 * dt;
     core.spin += (0.008 + core.energy * 0.012) * dt;
   }
 
-  function rotatedAnchor(point, now) {
-    const orbitAngle = point.orbitPhase + core.spin * point.spin;
-    const wobble = Math.sin(now * 0.0016 + point.seed) * core.radius * 0.016 * core.energy;
-    let x = (Math.cos(orbitAngle) * point.orbitRadius + wobble) * core.compression;
-    let y = (Math.sin(orbitAngle * 1.7 + point.seed) * point.orbitY + Math.cos(orbitAngle + point.seed) * wobble * 0.6) * core.compression;
-    let z = (Math.sin(orbitAngle) * point.orbitRadius * point.orbitDepth) * core.compression;
-
-    const tilt = point.orbitTilt;
-    const cosT = Math.cos(tilt);
-    const sinT = Math.sin(tilt);
-    const y0 = y * cosT - z * sinT;
-    const z0 = y * sinT + z * cosT;
-    y = y0;
-    z = z0;
-
-    const rotY = core.spin * 0.36;
-    const cosY = Math.cos(rotY);
-    const sinY = Math.sin(rotY);
-    const x1 = x * cosY + z * sinY;
-    const z1 = -x * sinY + z * cosY;
-
-    const rotX = Math.sin(core.spin * 0.42) * 0.2;
-    const cosX = Math.cos(rotX);
-    const sinX = Math.sin(rotX);
-    return {
-      x: x1,
-      y: y * cosX - z1 * sinX,
-      z: y * sinX + z1 * cosX,
-    };
-  }
-
-  function project(point) {
-    const fov = core.radius * 4.7;
-    const scale = fov / (fov + point.z);
-    return {
-      x: core.x + point.x * scale,
-      y: core.y + point.y * scale,
-      scale,
-    };
-  }
-
   function updateParticles(dt, now) {
     updateCore(dt);
-    particles.forEach((point) => {
-      const target = rotatedAnchor(point, now);
-      const spring = 0.026 + core.energy * 0.006;
-      point.vx += (target.x - point.x) * spring * dt;
-      point.vy += (target.y - point.y) * spring * dt;
-      point.vz += (target.z - point.z) * spring * dt;
-
-      const projected = project(point);
-      if (pointer.strength > 0.01) {
-        const dx = pointer.x - projected.x;
-        const dy = pointer.y - projected.y;
-        const dist = Math.max(18, Math.hypot(dx, dy));
-        const radius = core.radius * (pointer.down ? 4.3 : 3.25);
-        if (dist < radius) {
-          const falloff = Math.pow(1 - dist / radius, 2);
-          const fromCoreX = projected.x - core.x;
-          const fromCoreY = projected.y - core.y;
-          const fromCoreDist = Math.max(24, Math.hypot(fromCoreX, fromCoreY));
-          const burst = (pointer.down ? 0.095 : 0.042) * falloff * pointer.strength;
-          const pull = (pointer.down ? 0.14 : 0.066) * falloff * pointer.strength;
-          const tangent = (pointer.down ? 0.2 : 0.12) * falloff * pointer.strength;
-          const drag = Math.min(1.9, Math.hypot(pointer.vx, pointer.vy) / 8) * falloff;
-          point.vx += ((dx / dist) * pull - (dy / dist) * tangent + pointer.vx * 0.018 * drag + (fromCoreX / fromCoreDist) * burst) * dt;
-          point.vy += ((dy / dist) * pull + (dx / dist) * tangent + pointer.vy * 0.018 * drag + (fromCoreY / fromCoreDist) * burst) * dt;
-          point.vz += (pointer.down ? -0.34 : 0.14) * falloff * dt;
-        }
-      }
-
-      point.x += point.vx * dt;
-      point.y += point.vy * dt;
-      point.z += point.vz * dt;
-      point.vx *= 0.88;
-      point.vy *= 0.88;
-      point.vz *= 0.88;
-
-      const next = project(point);
-      point.psx = Number.isFinite(point.sx) ? point.sx : next.x;
-      point.psy = Number.isFinite(point.sy) ? point.sy : next.y;
-      point.sx = next.x;
-      point.sy = next.y;
-      point.scale = next.scale;
-    });
-
     for (let i = pulses.length - 1; i >= 0; i--) {
       const pulse = pulses[i];
       pulse.life -= 0.022 * dt;
@@ -1218,25 +1062,27 @@ function initEnergyFieldCanvas() {
   }
 
   function drawCoreAura(now) {
-    const pulse = 1 + Math.sin(now * 0.004) * 0.05 + pointer.strength * 0.18;
-    const auraRadius = core.radius * (1.72 + pointer.strength * 0.42);
+    const expanded = isExpandedMap();
+    const pulse = 1 + Math.sin(now * 0.004) * 0.04 + pointer.strength * 0.1;
+    const auraRadius = core.radius * (expanded ? 1.35 : 1.18);
     const aura = ctx.createRadialGradient(core.x, core.y, 0, core.x, core.y, auraRadius);
-    aura.addColorStop(0, "rgba(240, 251, 255, 0.42)");
-    aura.addColorStop(0.1, "rgba(125, 211, 252, 0.34)");
-    aura.addColorStop(0.36, "rgba(14, 165, 233, 0.16)");
+    aura.addColorStop(0, "rgba(240, 251, 255, 0.16)");
+    aura.addColorStop(0.18, "rgba(125, 211, 252, 0.12)");
+    aura.addColorStop(0.62, "rgba(14, 165, 233, 0.05)");
     aura.addColorStop(1, "rgba(14, 165, 233, 0)");
-    ctx.globalAlpha = 0.72;
+    ctx.globalAlpha = 0.82;
     ctx.fillStyle = aura;
     ctx.beginPath();
     ctx.arc(core.x, core.y, auraRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.lineWidth = 1.2;
-    for (let i = 0; i < 3; i++) {
-      const radius = core.radius * (0.86 + i * 0.28) * pulse;
-      ctx.strokeStyle = `rgba(125, 211, 252, ${0.34 - i * 0.06})`;
+    ctx.lineWidth = expanded ? 1.15 : 1.05;
+    for (let i = 0; i < 7; i++) {
+      const radius = core.radius * (0.72 + i * 0.105) * pulse;
+      const tilt = core.spin * (0.28 + i * 0.04) + i * 0.48;
+      ctx.strokeStyle = `rgba(125, 211, 252, ${0.24 - i * 0.018})`;
       ctx.beginPath();
-      ctx.ellipse(core.x, core.y, radius, radius * (0.45 + i * 0.08), core.spin * (0.45 + i * 0.16), 0, Math.PI * 2);
+      ctx.ellipse(core.x, core.y, radius, radius * (0.34 + i * 0.055), tilt, 0, Math.PI * 2);
       ctx.stroke();
     }
   }
@@ -1263,31 +1109,60 @@ function initEnergyFieldCanvas() {
   }
 
   function semanticPosition(node, now) {
+    const index = semanticNodes.indexOf(node);
+    const total = semanticNodes.length;
     const expanded = isExpandedMap();
-    const laneRadius = core.radius * (expanded ? 1.18 + node.lane * 0.24 : 1.05 + node.lane * 0.16);
-    const angle = node.phase + core.spin * (0.3 + node.lane * 0.035);
-    const tilt = -0.54 + node.lane * 0.24;
-    let x = Math.cos(angle) * laneRadius;
-    let y = Math.sin(angle * 1.32 + node.lane) * core.radius * (expanded ? 0.2 : 0.13);
-    let z = Math.sin(angle) * laneRadius * 0.82;
-    const cosT = Math.cos(tilt);
-    const sinT = Math.sin(tilt);
-    const y1 = y * cosT - z * sinT;
-    const z1 = y * sinT + z * cosT;
-    const fov = core.radius * 5.1;
+    const golden = Math.PI * (3 - Math.sqrt(5));
+    let x;
+    let y;
+    let z;
+
+    if (expanded) {
+      const ring = 0.42 + node.lane * 0.19;
+      const angle = node.phase + core.spin * 0.08;
+      const spreadX = Math.min(width * 0.42, 560) * spreadScale;
+      const spreadY = Math.min(height * 0.34, 310) * spreadScale;
+      x = Math.cos(angle) * spreadX * ring;
+      y = Math.sin(angle) * spreadY * (0.42 + node.lane * 0.13);
+      z = Math.sin(angle + node.lane * 0.55) * core.radius * 0.55;
+    } else {
+      const v = -1 + (2 * index + 1) / total;
+      const phi = Math.acos(v);
+      const theta = node.phase + index * golden + core.spin * (0.68 + node.lane * 0.05);
+      const sphereRadius = core.radius * (0.86 + (index % 3) * 0.07) * Math.min(1.16, spreadScale);
+      x = Math.cos(theta) * Math.sin(phi) * sphereRadius;
+      y = Math.cos(phi) * sphereRadius * 0.84;
+      z = Math.sin(theta) * Math.sin(phi) * sphereRadius;
+    }
+
+    const rotX = expanded ? Math.sin(core.spin * 0.18) * 0.08 : Math.sin(core.spin * 0.36) * 0.22;
+    const cosX = Math.cos(rotX);
+    const sinX = Math.sin(rotX);
+    const y1 = y * cosX - z * sinX;
+    const z1 = y * sinX + z * cosX;
+    const fov = core.radius * (expanded ? 7.2 : 4.6);
     const scale = fov / (fov + z1);
+    let sx = core.x + x * scale;
+    let sy = core.y + y1 * scale;
+
+    if (pointer.strength > 0.01) {
+      const follow = pointer.strength * (pointer.down ? 0.28 : 0.16) * (expanded ? 0.72 : 1);
+      sx += (pointer.x - sx) * follow;
+      sy += (pointer.y - sy) * follow;
+    }
+
     return {
       node,
-      x: core.x + x * scale,
-      y: core.y + y1 * scale,
+      x: sx,
+      y: sy,
       z: z1,
       scale,
-      radius: (expanded ? 5.8 : 4.2) * node.weight * Math.max(0.78, scale),
+      radius: (expanded ? 10.4 : 8.6) * node.weight * Math.max(0.78, scale),
     };
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.4.2"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.4.3"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
@@ -1301,13 +1176,13 @@ function initEnergyFieldCanvas() {
       const a = byKey.get(aKey);
       const b = byKey.get(bKey);
       if (!a || !b) return;
-      const alpha = isExpandedMap() ? 0.18 : 0.08;
+      const alpha = isExpandedMap() ? 0.2 : 0.12;
       const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
       gradient.addColorStop(0, `${a.node.glow}11`);
       gradient.addColorStop(0.5, `rgba(125, 211, 252, ${alpha})`);
       gradient.addColorStop(1, `${b.node.glow}11`);
       ctx.strokeStyle = gradient;
-      ctx.lineWidth = Math.max(0.7, (a.scale + b.scale) * 0.38);
+      ctx.lineWidth = Math.max(0.9, (a.scale + b.scale) * 0.42);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
@@ -1387,13 +1262,13 @@ function initEnergyFieldCanvas() {
 
     positions.forEach((item) => {
       const hover = hoveredSemantic && hoveredSemantic.node.key === item.node.key;
-      const glowRadius = item.radius * (hover ? 6.8 : 4.8);
+      const glowRadius = item.radius * (hover ? 4.8 : 3.4);
       const gradient = ctx.createRadialGradient(item.x, item.y, 0, item.x, item.y, glowRadius);
       gradient.addColorStop(0, `${item.node.color}ff`);
       gradient.addColorStop(0.22, `${item.node.glow}cc`);
       gradient.addColorStop(1, `${item.node.glow}00`);
       ctx.globalCompositeOperation = "lighter";
-      ctx.globalAlpha = hover ? 0.96 : 0.7;
+      ctx.globalAlpha = hover ? 0.95 : 0.78;
       ctx.fillStyle = gradient;
       ctx.beginPath();
       ctx.arc(item.x, item.y, glowRadius, 0, Math.PI * 2);
@@ -1402,49 +1277,13 @@ function initEnergyFieldCanvas() {
       ctx.globalAlpha = 1;
       ctx.fillStyle = item.node.color;
       ctx.strokeStyle = item.node.glow;
-      ctx.lineWidth = hover ? 2 : 1.2;
+      ctx.lineWidth = hover ? 2.4 : 1.4;
       ctx.beginPath();
       ctx.arc(item.x, item.y, item.radius, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
       if (isExpandedMap() || hover) drawSemanticLabel(item, placedLabels);
     });
-  }
-
-  function drawParticle(point, now) {
-    const speed = Math.hypot(point.sx - point.psx, point.sy - point.psy);
-    const depth = Math.max(0.45, Math.min(1.55, point.scale || 1));
-    const flicker = 0.78 + Math.sin(now * 0.003 + point.seed) * 0.22;
-    const alpha = Math.min(0.78, point.alpha * flicker * (0.48 + depth * 0.22) * (0.84 + pointer.strength * 0.18));
-    const radius = point.size * depth * (1.05 + pointer.strength * 0.18);
-
-    if (speed > 0.35) {
-      ctx.globalAlpha = Math.min(0.38, speed * 0.038) * alpha;
-      ctx.strokeStyle = point.color.glow;
-      ctx.lineWidth = Math.max(0.75, radius * 0.52);
-      ctx.beginPath();
-      ctx.moveTo(point.psx, point.psy);
-      ctx.lineTo(point.sx, point.sy);
-      ctx.stroke();
-    }
-
-    const glowRadius = radius * (3.15 + core.energy * 0.95);
-    const gradient = ctx.createRadialGradient(point.sx, point.sy, 0, point.sx, point.sy, glowRadius);
-    gradient.addColorStop(0, `${point.color.core}ff`);
-    gradient.addColorStop(0.18, `${point.color.glow}b8`);
-    gradient.addColorStop(0.54, `${point.color.glow}24`);
-    gradient.addColorStop(1, `${point.color.glow}00`);
-    ctx.globalAlpha = alpha;
-    ctx.fillStyle = gradient;
-    ctx.beginPath();
-    ctx.arc(point.sx, point.sy, glowRadius, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.globalAlpha = Math.min(0.92, alpha + 0.22);
-    ctx.fillStyle = point.color.core;
-    ctx.beginPath();
-    ctx.arc(point.sx, point.sy, Math.max(0.75, radius * 0.56), 0, Math.PI * 2);
-    ctx.fill();
   }
 
   function drawForceField(now) {
@@ -1487,7 +1326,6 @@ function initEnergyFieldCanvas() {
     ctx.lineCap = "round";
     drawCoreAura(now);
     drawDragTrail();
-    particles.slice().sort((a, b) => b.z - a.z).forEach((point) => drawParticle(point, now));
     drawSemanticNodes(now);
     drawForceField(now);
     drawPulses();
@@ -1582,10 +1420,9 @@ function initEnergyFieldCanvas() {
   host.addEventListener("wheel", (event) => {
     event.preventDefault();
     const direction = event.deltaY < 0 ? 1 : -1;
-    densityScale = Math.max(0.36, Math.min(1.38, densityScale + direction * 0.12));
-    syncParticleCount(false);
+    spreadScale = Math.max(0.68, Math.min(1.45, spreadScale + direction * 0.08));
     targetEnergy = Math.max(0.72, Math.min(1.95, targetEnergy + direction * 0.035));
-    addPulse(pointer.active ? pointer.x : core.x, pointer.active ? pointer.y : core.y, 0.75 + densityScale * 0.3);
+    addPulse(pointer.active ? pointer.x : core.x, pointer.active ? pointer.y : core.y, 0.75 + spreadScale * 0.3);
   }, { passive: false });
 
   if (resize()) {
