@@ -888,7 +888,7 @@ function initEnergyFieldCanvas() {
     { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
     { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
     { key: "strategy", symbol: "St", label: "策略版本", type: "BACKTEST", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86, metric: "EVOLVE" },
-    { key: "github", symbol: "Gh", label: "GitHub v0.4.8", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
+    { key: "github", symbol: "Gh", label: "GitHub v0.4.9", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
     { key: "log", symbol: "Lg", label: "工作日志", type: "LOG", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8, metric: "TRACE" },
     { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
@@ -932,6 +932,15 @@ function initEnergyFieldCanvas() {
   let targetSemanticZoom = 0;
   let lastPinchDistance = null;
   let hoveredSemantic = null;
+  const orbit = {
+    yaw: 0,
+    pitch: 0,
+    yawVelocity: 0,
+    pitchVelocity: 0,
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+  };
   const gesture = {
     enabled: false,
     loading: false,
@@ -1070,6 +1079,13 @@ function initEnergyFieldCanvas() {
     const targetCompression = pointer.down ? 0.82 : pointer.active ? 0.9 : 1;
     core.compression += (targetCompression - core.compression) * 0.055 * dt;
     core.spin += (0.008 + core.energy * 0.012) * dt;
+
+    orbit.yaw += orbit.yawVelocity * dt;
+    orbit.pitch += orbit.pitchVelocity * dt;
+    orbit.pitch = Math.max(-0.82, Math.min(0.82, orbit.pitch));
+    const damping = orbit.dragging ? 0.86 : 0.94;
+    orbit.yawVelocity *= Math.pow(damping, dt);
+    orbit.pitchVelocity *= Math.pow(damping, dt);
   }
 
   function updateParticles(dt, now) {
@@ -1169,7 +1185,7 @@ function initEnergyFieldCanvas() {
     ctx.lineWidth = expanded ? 1.15 : 1.05;
     for (let i = 0; i < 7; i++) {
       const radius = core.radius * (0.72 + i * 0.105) * pulse;
-      const tilt = core.spin * (0.28 + i * 0.04) + i * 0.48;
+      const tilt = core.spin * (0.28 + i * 0.04) + i * 0.48 + orbit.yaw * 0.24;
       ctx.strokeStyle = `rgba(125, 211, 252, ${0.24 - i * 0.018})`;
       ctx.beginPath();
       ctx.ellipse(core.x, core.y, radius, radius * (0.34 + i * 0.055), tilt, 0, Math.PI * 2);
@@ -1202,7 +1218,7 @@ function initEnergyFieldCanvas() {
       ctx.fillText("DUO CORE", core.x, core.y - 3);
       ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
       ctx.font = `500 9px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-      ctx.fillText(`v${state.version || "0.4.8"}`, core.x, core.y + 11);
+      ctx.fillText(`v${state.version || "0.4.9"}`, core.x, core.y + 11);
       ctx.textAlign = "start";
     }
   }
@@ -1214,7 +1230,7 @@ function initEnergyFieldCanvas() {
     const meridians = expanded ? 11 : 7;
     ctx.save();
     ctx.translate(core.x, core.y);
-    ctx.rotate(core.spin * 0.08);
+    ctx.rotate(core.spin * 0.08 + orbit.yaw * 0.18);
     ctx.globalCompositeOperation = "lighter";
     ctx.lineWidth = expanded ? 1.05 : 0.8;
 
@@ -1302,16 +1318,21 @@ function initEnergyFieldCanvas() {
       z = Math.sin(theta) * Math.sin(phi) * sphereRadius;
     }
 
-    const rotX = expanded ? Math.sin(core.spin * 0.18) * 0.08 : Math.sin(core.spin * 0.36) * 0.22;
+    const yaw = orbit.yaw + (expanded ? Math.sin(core.spin * 0.12) * 0.035 : 0);
+    const cosY = Math.cos(yaw);
+    const sinY = Math.sin(yaw);
+    const x0 = x * cosY + z * sinY;
+    const z0 = -x * sinY + z * cosY;
+    const rotX = orbit.pitch + (expanded ? Math.sin(core.spin * 0.18) * 0.08 : Math.sin(core.spin * 0.36) * 0.22);
     const cosX = Math.cos(rotX);
     const sinX = Math.sin(rotX);
-    const y1 = y * cosX - z * sinX;
-    const z1 = y * sinX + z * cosX;
+    const y1 = y * cosX - z0 * sinX;
+    const z1 = y * sinX + z0 * cosX;
     const fov = core.radius * (expanded ? 7.2 : 4.6);
     const scale = fov / (fov + z1);
     return {
       node,
-      x: core.x + x * scale,
+      x: core.x + x0 * scale,
       y: core.y + y1 * scale,
       z: z1,
       scale,
@@ -1320,7 +1341,7 @@ function initEnergyFieldCanvas() {
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.4.8"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.4.9"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
@@ -1332,7 +1353,7 @@ function initEnergyFieldCanvas() {
     if (node.key === "codex") return state.codex_status || "idle";
     if (node.key === "tasks") return state.phase || "idle";
     if (node.key === "division") return state.division_status || "stable";
-    if (node.key === "github") return state.version || "0.4.8";
+    if (node.key === "github") return state.version || "0.4.9";
     return node.metric;
   }
 
@@ -1384,7 +1405,7 @@ function initEnergyFieldCanvas() {
     for (let i = 0; i < orbitCount; i++) {
       const radius = core.radius * (0.5 + i * 0.13);
       const tilt = 0.28 + i * 0.05;
-      const angle = core.spin * (0.18 + i * 0.025) + i * 0.5;
+      const angle = core.spin * (0.18 + i * 0.025) + i * 0.5 + orbit.yaw * 0.22;
       ctx.strokeStyle = `rgba(125, 211, 252, ${0.12 - i * 0.01})`;
       ctx.lineWidth = i % 3 === 0 ? 0.9 : 0.65;
       ctx.beginPath();
@@ -1691,7 +1712,7 @@ function initEnergyFieldCanvas() {
     const protocolRows = [
       { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
       { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },
-      { key: "BUILD", value: `v${state.version || "0.4.8"}`, color: "#e1e4ed", level: 0.84 },
+      { key: "BUILD", value: `v${state.version || "0.4.9"}`, color: "#e1e4ed", level: 0.84 },
     ];
     const systemRows = [
       { key: "MEMORY", value: "linked", color: "#a78bfa", level: 0.82 },
@@ -1802,8 +1823,32 @@ function initEnergyFieldCanvas() {
     };
   }
 
-  function syncPointerFromEvent(event) {
-    pointers.set(event.pointerId, localPoint(event));
+  function syncPointerFromEvent(event, point = localPoint(event)) {
+    pointers.set(event.pointerId, point);
+  }
+
+  function beginOrbitDrag(point) {
+    orbit.dragging = true;
+    orbit.lastX = point.x;
+    orbit.lastY = point.y;
+  }
+
+  function applyOrbitDrag(point) {
+    if (!orbit.dragging || pointers.size > 1) {
+      orbit.lastX = point.x;
+      orbit.lastY = point.y;
+      return;
+    }
+    const dx = point.x - orbit.lastX;
+    const dy = point.y - orbit.lastY;
+    const factor = isExpandedMap() ? 0.00125 : 0.0019;
+    orbit.yawVelocity += dx * factor;
+    orbit.pitchVelocity += dy * factor;
+    orbit.yawVelocity = Math.max(-0.08, Math.min(0.08, orbit.yawVelocity));
+    orbit.pitchVelocity = Math.max(-0.055, Math.min(0.055, orbit.pitchVelocity));
+    orbit.lastX = point.x;
+    orbit.lastY = point.y;
+    targetEnergy = Math.max(targetEnergy, 1.12);
   }
 
   function updatePinchEnergy() {
@@ -2000,12 +2045,16 @@ function initEnergyFieldCanvas() {
     updateGestureButton();
   }
   host.addEventListener("pointermove", (event) => {
-    syncPointerFromEvent(event);
+    const point = localPoint(event);
+    if (pointer.down) applyOrbitDrag(point);
+    syncPointerFromEvent(event, point);
     updatePinchEnergy();
   }, { passive: true });
   host.addEventListener("pointerdown", (event) => {
     pointer.down = true;
-    syncPointerFromEvent(event);
+    const point = localPoint(event);
+    beginOrbitDrag(point);
+    syncPointerFromEvent(event, point);
     updatePinchEnergy();
     targetEnergy = Math.min(1.32, targetEnergy + 0.1);
     try { host.setPointerCapture(event.pointerId); } catch (err) {}
@@ -2013,16 +2062,19 @@ function initEnergyFieldCanvas() {
   window.addEventListener("pointerup", (event) => {
     pointers.delete(event.pointerId);
     pointer.down = pointers.size > 0;
+    if (!pointer.down) orbit.dragging = false;
     lastPinchDistance = null;
   }, { passive: true });
   window.addEventListener("pointercancel", (event) => {
     pointers.delete(event.pointerId);
     pointer.down = pointers.size > 0;
+    if (!pointer.down) orbit.dragging = false;
     lastPinchDistance = null;
   }, { passive: true });
   host.addEventListener("pointerleave", (event) => {
     if (!pointer.down) {
       pointers.delete(event.pointerId);
+      orbit.dragging = false;
       lastPinchDistance = null;
     }
   }, { passive: true });
