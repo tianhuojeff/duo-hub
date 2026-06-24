@@ -886,7 +886,7 @@ function initEnergyFieldCanvas() {
     { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
     { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
     { key: "strategy", symbol: "St", label: "策略版本", type: "BACKTEST", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86, metric: "EVOLVE" },
-    { key: "github", symbol: "Gh", label: "GitHub v0.4.6", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
+    { key: "github", symbol: "Gh", label: "GitHub v0.4.7", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
     { key: "log", symbol: "Lg", label: "工作日志", type: "LOG", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8, metric: "TRACE" },
     { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
@@ -1015,10 +1015,7 @@ function initEnergyFieldCanvas() {
       pointer.lastMove = now;
       targetEnergy = pointer.down ? 1.74 : 1.24;
 
-      if (Math.hypot(pointer.vx, pointer.vy) > 0.7) {
-        dragTrail.push({ x: pointer.x, y: pointer.y, life: 1 });
-        if (dragTrail.length > 26) dragTrail.shift();
-      }
+      dragTrail.length = 0;
     } else if (now - pointer.lastMove > 850) {
       pointer.active = false;
       pointer.down = false;
@@ -1074,27 +1071,41 @@ function initEnergyFieldCanvas() {
 
   function drawHudBackplane(now) {
     const expanded = isExpandedMap();
-    const scanX = (now * 0.022) % Math.max(1, width);
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(125, 211, 252, 0.07)";
-    for (let i = 0; i < 9; i++) {
-      const y = height * (0.16 + i * 0.078);
+    const dustCount = expanded ? 42 : 24;
+    const rand = (seed) => {
+      const value = Math.sin(seed * 12.9898) * 43758.5453;
+      return value - Math.floor(value);
+    };
+    for (let i = 0; i < dustCount; i++) {
+      const x = rand(i + 1.27) * width;
+      const y = rand(i + 101.91) * height;
+      const twinkle = 0.35 + Math.sin(now * 0.0011 + i * 1.9) * 0.18;
+      ctx.globalAlpha = Math.max(0.08, twinkle) * (expanded ? 0.48 : 0.34);
+      ctx.fillStyle = i % 4 === 0 ? "#bae6fd" : "rgba(226, 232, 240, 0.86)";
       ctx.beginPath();
-      ctx.moveTo(width * 0.18, y);
-      ctx.lineTo(width * 0.82, y + Math.sin(now * 0.001 + i) * 10);
-      ctx.stroke();
+      ctx.arc(x, y, i % 5 === 0 ? 1.15 : 0.75, 0, Math.PI * 2);
+      ctx.fill();
     }
-    ctx.strokeStyle = "rgba(125, 211, 252, 0.12)";
-    ctx.beginPath();
-    ctx.moveTo(scanX, 0);
-    ctx.lineTo(scanX - width * 0.08, height);
-    ctx.stroke();
     if (expanded) {
-      ctx.strokeStyle = "rgba(125, 211, 252, 0.14)";
-      ctx.strokeRect(width * 0.06, height * 0.18, width * 0.22, height * 0.56);
-      ctx.strokeRect(width * 0.72, height * 0.2, width * 0.22, height * 0.52);
+      ctx.globalAlpha = 0.12;
+      ctx.strokeStyle = "rgba(125, 211, 252, 0.38)";
+      ctx.lineWidth = 1;
+      const frames = [
+        [width * 0.08, height * 0.2, width * 0.18, height * 0.5],
+        [width * 0.74, height * 0.22, width * 0.18, height * 0.48],
+      ];
+      frames.forEach(([x, y, w, h]) => {
+        ctx.beginPath();
+        ctx.moveTo(x, y + 28);
+        ctx.lineTo(x, y);
+        ctx.lineTo(x + 42, y);
+        ctx.moveTo(x + w - 42, y + h);
+        ctx.lineTo(x + w, y + h);
+        ctx.lineTo(x + w, y + h - 28);
+        ctx.stroke();
+      });
     }
     ctx.restore();
   }
@@ -1162,7 +1173,7 @@ function initEnergyFieldCanvas() {
       ctx.fillText("DUO CORE", core.x, core.y - 3);
       ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
       ctx.font = `500 9px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-      ctx.fillText(`v${state.version || "0.4.6"}`, core.x, core.y + 11);
+      ctx.fillText(`v${state.version || "0.4.7"}`, core.x, core.y + 11);
       ctx.textAlign = "start";
     }
   }
@@ -1280,7 +1291,7 @@ function initEnergyFieldCanvas() {
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.4.6"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.4.7"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
@@ -1292,7 +1303,7 @@ function initEnergyFieldCanvas() {
     if (node.key === "codex") return state.codex_status || "idle";
     if (node.key === "tasks") return state.phase || "idle";
     if (node.key === "division") return state.division_status || "stable";
-    if (node.key === "github") return state.version || "0.4.6";
+    if (node.key === "github") return state.version || "0.4.7";
     return node.metric;
   }
 
@@ -1637,7 +1648,7 @@ function initEnergyFieldCanvas() {
     const protocolRows = [
       { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
       { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },
-      { key: "BUILD", value: `v${state.version || "0.4.6"}`, color: "#e1e4ed", level: 0.84 },
+      { key: "BUILD", value: `v${state.version || "0.4.7"}`, color: "#e1e4ed", level: 0.84 },
     ];
     const systemRows = [
       { key: "MEMORY", value: "linked", color: "#a78bfa", level: 0.82 },
@@ -1702,7 +1713,7 @@ function initEnergyFieldCanvas() {
     drawHudBackplane(now);
     drawHologramSphere(now);
     drawCoreAura(now);
-    drawDragTrail();
+    if (isExpandedMap() && pointer.active && pointer.down) drawDragTrail();
     const positions = getSemanticPositions(now);
     if (isExpandedMap()) {
       drawSemanticNodes(positions, now);
@@ -1710,8 +1721,6 @@ function initEnergyFieldCanvas() {
     } else {
       drawCompactStellarSystem(positions, now);
     }
-    drawForceField(now);
-    drawPulses();
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = "source-over";
   }
@@ -1778,16 +1787,13 @@ function initEnergyFieldCanvas() {
     pointer.down = true;
     syncPointerFromEvent(event);
     updatePinchEnergy();
-    const point = localPoint(event);
-    addPulse(point.x, point.y, 1.4);
+    targetEnergy = Math.min(1.32, targetEnergy + 0.1);
     try { host.setPointerCapture(event.pointerId); } catch (err) {}
   }, { passive: true });
   window.addEventListener("pointerup", (event) => {
     pointers.delete(event.pointerId);
     pointer.down = pointers.size > 0;
     lastPinchDistance = null;
-    const point = localPoint(event);
-    addPulse(point.x, point.y, 0.8);
   }, { passive: true });
   window.addEventListener("pointercancel", (event) => {
     pointers.delete(event.pointerId);
@@ -1805,7 +1811,6 @@ function initEnergyFieldCanvas() {
     const direction = event.deltaY < 0 ? 1 : -1;
     spreadScale = Math.max(0.68, Math.min(1.45, spreadScale + direction * 0.08));
     targetEnergy = Math.max(0.72, Math.min(1.95, targetEnergy + direction * 0.035));
-    addPulse(pointer.active ? pointer.x : core.x, pointer.active ? pointer.y : core.y, 0.75 + spreadScale * 0.3);
   }, { passive: false });
 
   if (resize()) {
