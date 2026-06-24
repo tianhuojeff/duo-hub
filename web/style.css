@@ -184,6 +184,43 @@ header,
   flex-shrink: 0;
 }
 
+.map-gesture {
+  height: 24px;
+  margin-left: 8px;
+  padding: 0 9px;
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.62);
+  color: #8b8fa8;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.68em;
+  line-height: 1;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.map-gesture:hover {
+  border-color: rgba(125, 211, 252, 0.58);
+  color: #bae6fd;
+}
+
+.map-gesture.is-loading {
+  color: #facc15;
+  border-color: rgba(250, 204, 21, 0.55);
+}
+
+.map-gesture.is-active {
+  color: #dcfce7;
+  border-color: rgba(34, 197, 94, 0.72);
+  background: rgba(34, 197, 94, 0.14);
+}
+
+.map-gesture.is-error {
+  color: #fecaca;
+  border-color: rgba(239, 68, 68, 0.62);
+}
+
 .map-expand:hover {
   border-color: rgba(125, 211, 252, 0.72);
   background: rgba(14, 165, 233, 0.18);
@@ -658,6 +695,12 @@ body.map-immersive::after {
     width: 26px;
     height: 24px;
     margin-left: 4px;
+  }
+  .map-gesture {
+    height: 24px;
+    margin-left: 4px;
+    padding: 0 7px;
+    font-size: 0.62em;
   }
   .map-viewport {
     height: calc(100% - 32px);

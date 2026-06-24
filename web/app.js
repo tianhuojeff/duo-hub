@@ -38,6 +38,7 @@ const elGraphCanvas = $("#graph-canvas");
 const elStarMapWindow = $(".star-map-window");
 const elMapViewport = $("#star-map-viewport");
 const elBtnMapExpand = $("#btn-map-expand");
+const elBtnMapGesture = $("#btn-map-gesture");
 
 let state = {
   phase: "idle",
@@ -483,6 +484,7 @@ function setMapExpanded(expanded) {
   elBtnMapExpand.textContent = expanded ? "×" : "⛶";
   elBtnMapExpand.title = expanded ? "收起星图" : "放大星图";
   elBtnMapExpand.setAttribute("aria-label", expanded ? "收起星图" : "放大星图");
+  window.dispatchEvent(new CustomEvent("map-expanded-change", { detail: { expanded } }));
   window.requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
 }
 
@@ -886,7 +888,7 @@ function initEnergyFieldCanvas() {
     { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
     { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
     { key: "strategy", symbol: "St", label: "策略版本", type: "BACKTEST", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86, metric: "EVOLVE" },
-    { key: "github", symbol: "Gh", label: "GitHub v0.4.7", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
+    { key: "github", symbol: "Gh", label: "GitHub v0.4.8", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
     { key: "log", symbol: "Lg", label: "工作日志", type: "LOG", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8, metric: "TRACE" },
     { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
@@ -926,11 +928,34 @@ function initEnergyFieldCanvas() {
   let lastTime = performance.now();
   let targetEnergy = 0.86;
   let spreadScale = 1;
+  let semanticZoom = 0;
+  let targetSemanticZoom = 0;
   let lastPinchDistance = null;
   let hoveredSemantic = null;
+  const gesture = {
+    enabled: false,
+    loading: false,
+    recognizer: null,
+    video: null,
+    stream: null,
+    lastVideoTime: -1,
+    lastFrame: 0,
+    point: null,
+    strength: 0,
+    gestureName: "",
+    error: "",
+  };
 
   function isExpandedMap() {
     return !!(elStarMapWindow && elStarMapWindow.classList.contains("is-expanded"));
+  }
+
+  function infoAmount() {
+    return semanticZoom;
+  }
+
+  function shouldShowInformation() {
+    return infoAmount() >= 0.72;
   }
 
   function desiredParticleCount() {
@@ -991,6 +1016,9 @@ function initEnergyFieldCanvas() {
   }
 
   function activePointer() {
+    if (!pointers.size && gesture.enabled && gesture.point && performance.now() - gesture.lastFrame < 520) {
+      return gesture.point;
+    }
     if (!pointers.size) return null;
     const points = Array.from(pointers.values());
     const sum = points.reduce((acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }), { x: 0, y: 0 });
@@ -1046,6 +1074,7 @@ function initEnergyFieldCanvas() {
 
   function updateParticles(dt, now) {
     updateCore(dt);
+    semanticZoom += (targetSemanticZoom - semanticZoom) * Math.min(1, 0.12 * dt);
     for (let i = pulses.length - 1; i >= 0; i--) {
       const pulse = pulses[i];
       pulse.life -= 0.022 * dt;
@@ -1173,7 +1202,7 @@ function initEnergyFieldCanvas() {
       ctx.fillText("DUO CORE", core.x, core.y - 3);
       ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
       ctx.font = `500 9px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-      ctx.fillText(`v${state.version || "0.4.7"}`, core.x, core.y + 11);
+      ctx.fillText(`v${state.version || "0.4.8"}`, core.x, core.y + 11);
       ctx.textAlign = "start";
     }
   }
@@ -1291,7 +1320,7 @@ function initEnergyFieldCanvas() {
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.4.7"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.4.8"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
@@ -1303,7 +1332,7 @@ function initEnergyFieldCanvas() {
     if (node.key === "codex") return state.codex_status || "idle";
     if (node.key === "tasks") return state.phase || "idle";
     if (node.key === "division") return state.division_status || "stable";
-    if (node.key === "github") return state.version || "0.4.7";
+    if (node.key === "github") return state.version || "0.4.8";
     return node.metric;
   }
 
@@ -1346,7 +1375,7 @@ function initEnergyFieldCanvas() {
     return nearest;
   }
 
-  function drawCompactStellarSystem(positions, now) {
+  function drawCompactStellarSystem(positions, now, zoom = semanticZoom) {
     hoveredSemantic = findHoveredNode(positions, 10);
     ctx.save();
     ctx.globalCompositeOperation = "lighter";
@@ -1368,25 +1397,39 @@ function initEnergyFieldCanvas() {
       const hover = hoveredSemantic && hoveredSemantic.node.key === item.node.key;
       const angle = Math.atan2(item.y - core.y, item.x - core.x);
       const distance = Math.hypot(item.x - core.x, item.y - core.y);
-      const trailLength = hover ? 0.72 : 0.34 + front * 0.12;
-      ctx.globalAlpha = hover ? 0.42 : 0.16 + front * 0.1;
+      const trailLength = hover ? 0.72 : 0.28 + front * 0.12 + zoom * 0.18;
+      ctx.globalAlpha = hover ? 0.42 : 0.12 + front * 0.08 + zoom * 0.05;
       ctx.strokeStyle = item.node.glow;
       ctx.lineWidth = hover ? 1.25 : 0.8;
       ctx.beginPath();
       ctx.arc(core.x, core.y, distance, angle - trailLength, angle + 0.04);
       ctx.stroke();
 
-      const starRadius = (hover ? 3.8 : 2.1 + front * 1.7) * item.node.weight;
-      const glowRadius = starRadius * (hover ? 9 : 6.5);
+      const starRadius = (hover ? 3.4 : 1.7 + front * 1.2 + zoom * 0.9) * item.node.weight;
+      const glowRadius = starRadius * (hover ? 8.2 : 5.8 + zoom * 1.4);
       const glow = ctx.createRadialGradient(item.x, item.y, 0, item.x, item.y, glowRadius);
       glow.addColorStop(0, `${item.node.color}ff`);
       glow.addColorStop(0.3, `${item.node.glow}aa`);
       glow.addColorStop(1, `${item.node.glow}00`);
-      ctx.globalAlpha = hover ? 0.95 : 0.72 + front * 0.18;
+      ctx.globalAlpha = hover ? 0.95 : 0.68 + front * 0.16;
       ctx.fillStyle = glow;
       ctx.beginPath();
       ctx.arc(item.x, item.y, glowRadius, 0, Math.PI * 2);
       ctx.fill();
+
+      const particleCount = hover ? 10 : 7;
+      for (let j = 0; j < particleCount; j++) {
+        const particlePhase = item.node.phase * 3.1 + j * 2.399 + core.spin * (0.52 + j * 0.018);
+        const cloudRadius = starRadius * (2.1 + (j % 3) * 0.62 + zoom * 1.15);
+        const px = item.x + Math.cos(particlePhase) * cloudRadius;
+        const py = item.y + Math.sin(particlePhase * 1.27) * cloudRadius * 0.62;
+        const pr = Math.max(0.72, starRadius * (j % 4 === 0 ? 0.48 : 0.32));
+        ctx.globalAlpha = (hover ? 0.82 : 0.42 + front * 0.2) * (1 - j * 0.035);
+        ctx.fillStyle = j % 3 === 0 ? item.node.color : item.node.glow;
+        ctx.beginPath();
+        ctx.arc(px, py, pr, 0, Math.PI * 2);
+        ctx.fill();
+      }
 
       ctx.fillStyle = item.node.color;
       ctx.beginPath();
@@ -1648,7 +1691,7 @@ function initEnergyFieldCanvas() {
     const protocolRows = [
       { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
       { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },
-      { key: "BUILD", value: `v${state.version || "0.4.7"}`, color: "#e1e4ed", level: 0.84 },
+      { key: "BUILD", value: `v${state.version || "0.4.8"}`, color: "#e1e4ed", level: 0.84 },
     ];
     const systemRows = [
       { key: "MEMORY", value: "linked", color: "#a78bfa", level: 0.82 },
@@ -1715,11 +1758,11 @@ function initEnergyFieldCanvas() {
     drawCoreAura(now);
     if (isExpandedMap() && pointer.active && pointer.down) drawDragTrail();
     const positions = getSemanticPositions(now);
-    if (isExpandedMap()) {
+    if (shouldShowInformation()) {
       drawSemanticNodes(positions, now);
-      drawExpandedConsole(positions, now);
+      if (isExpandedMap()) drawExpandedConsole(positions, now);
     } else {
-      drawCompactStellarSystem(positions, now);
+      drawCompactStellarSystem(positions, now, infoAmount());
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = "source-over";
@@ -1728,6 +1771,7 @@ function initEnergyFieldCanvas() {
   function animate(now) {
     const dt = Math.min(2.2, Math.max(0.55, (now - lastTime) / 16.67));
     lastTime = now;
+    updateGestureControl(now);
     updatePointer(now);
     updateParticles(dt, now);
     draw(now);
@@ -1775,9 +1819,185 @@ function initEnergyFieldCanvas() {
     }
   }
 
+  function updateGestureButton() {
+    if (!elBtnMapGesture) return;
+    elBtnMapGesture.classList.toggle("is-loading", gesture.loading);
+    elBtnMapGesture.classList.toggle("is-active", gesture.enabled && !gesture.error);
+    elBtnMapGesture.classList.toggle("is-error", !!gesture.error);
+    if (gesture.loading) {
+      elBtnMapGesture.textContent = "加载";
+      elBtnMapGesture.title = "正在加载手势识别";
+      return;
+    }
+    if (gesture.error) {
+      elBtnMapGesture.textContent = "手势!";
+      elBtnMapGesture.title = gesture.error;
+      return;
+    }
+    if (gesture.enabled) {
+      elBtnMapGesture.textContent = gesture.gestureName ? gesture.gestureName.replace(/_/g, " ") : "手势开";
+      elBtnMapGesture.title = "关闭手势控制";
+      return;
+    }
+    elBtnMapGesture.textContent = "手势";
+    elBtnMapGesture.title = "开启手势控制";
+  }
+
+  async function startGestureControl() {
+    if (gesture.loading || gesture.enabled) return;
+    gesture.loading = true;
+    gesture.error = "";
+    updateGestureButton();
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("当前浏览器不支持摄像头手势识别");
+      }
+      const { GestureRecognizer, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: "user",
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
+      });
+      gesture.stream = stream;
+      gesture.video = document.createElement("video");
+      gesture.video.autoplay = true;
+      gesture.video.muted = true;
+      gesture.video.playsInline = true;
+      gesture.video.srcObject = stream;
+      await gesture.video.play();
+
+      const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm");
+      gesture.recognizer = await GestureRecognizer.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-tasks/gesture_recognizer/gesture_recognizer.task",
+        },
+        runningMode: "VIDEO",
+        numHands: 2,
+      });
+      gesture.enabled = true;
+      gesture.lastVideoTime = -1;
+    } catch (error) {
+      stopGestureControl();
+      gesture.error = error.message || "手势识别启动失败";
+      window.setTimeout(() => {
+        gesture.error = "";
+        updateGestureButton();
+      }, 4200);
+    } finally {
+      gesture.loading = false;
+      updateGestureButton();
+    }
+  }
+
+  function stopGestureControl() {
+    gesture.enabled = false;
+    gesture.loading = false;
+    gesture.point = null;
+    gesture.strength = 0;
+    gesture.gestureName = "";
+    gesture.lastVideoTime = -1;
+    if (gesture.stream) {
+      gesture.stream.getTracks().forEach((track) => track.stop());
+    }
+    gesture.stream = null;
+    gesture.video = null;
+    if (gesture.recognizer?.close) {
+      try { gesture.recognizer.close(); } catch (err) {}
+    }
+    gesture.recognizer = null;
+    updateGestureButton();
+  }
+
+  function gestureResultForFrame(now) {
+    if (!gesture.enabled || !gesture.video || !gesture.recognizer) return null;
+    if (gesture.video.readyState < 2 || gesture.video.currentTime === gesture.lastVideoTime) return null;
+    gesture.lastVideoTime = gesture.video.currentTime;
+    try {
+      return gesture.recognizer.recognizeForVideo(gesture.video, now);
+    } catch (error) {
+      try {
+        return gesture.recognizer.recognizeForVideo(gesture.video);
+      } catch (fallbackError) {
+        gesture.error = fallbackError.message || error.message || "手势识别帧处理失败";
+        updateGestureButton();
+        return null;
+      }
+    }
+  }
+
+  function updateGestureControl(now) {
+    const result = gestureResultForFrame(now);
+    if (!result?.landmarks?.length) {
+      if (gesture.enabled && now - gesture.lastFrame > 700) gesture.point = null;
+      return;
+    }
+
+    const hand = result.landmarks[0];
+    const indexTip = hand[8] || hand[5] || hand[0];
+    const thumbTip = hand[4] || hand[1] || hand[0];
+    const wrist = hand[0] || indexTip;
+    const secondHand = result.landmarks[1];
+    const mirroredX = 1 - indexTip.x;
+    const nextPoint = {
+      x: Math.max(0, Math.min(width, mirroredX * width)),
+      y: Math.max(0, Math.min(height, indexTip.y * height)),
+    };
+    if (gesture.point) {
+      gesture.point.x += (nextPoint.x - gesture.point.x) * 0.44;
+      gesture.point.y += (nextPoint.y - gesture.point.y) * 0.44;
+    } else {
+      gesture.point = nextPoint;
+    }
+    gesture.lastFrame = now;
+    gesture.strength += (1 - gesture.strength) * 0.18;
+
+    const topGesture = result.gestures?.[0]?.[0]?.categoryName || "";
+    gesture.gestureName = topGesture;
+    const pinchDistance = Math.hypot(indexTip.x - thumbTip.x, indexTip.y - thumbTip.y);
+    const pinchZoom = Math.max(0, Math.min(1, (pinchDistance - 0.035) / 0.17));
+
+    if (secondHand?.[0]) {
+      const secondWrist = secondHand[0];
+      const twoHandDistance = Math.hypot(wrist.x - secondWrist.x, wrist.y - secondWrist.y);
+      targetSemanticZoom = Math.max(0, Math.min(1, (twoHandDistance - 0.12) / 0.34));
+    } else if (topGesture === "Open_Palm") {
+      targetSemanticZoom = Math.max(targetSemanticZoom, 0.9);
+    } else if (topGesture === "Closed_Fist") {
+      targetSemanticZoom = Math.min(targetSemanticZoom, 0.08);
+    } else {
+      targetSemanticZoom = targetSemanticZoom * 0.86 + pinchZoom * 0.14;
+    }
+
+    if (!isExpandedMap() && targetSemanticZoom >= 0.78) {
+      setMapExpanded(true);
+    }
+    targetEnergy = Math.max(targetEnergy, 1 + gesture.strength * 0.28);
+    updateGestureButton();
+  }
+
   window.addEventListener("resize", resize);
+  window.addEventListener("map-expanded-change", (event) => {
+    const expanded = !!event.detail?.expanded;
+    targetSemanticZoom = expanded ? 1 : 0;
+    semanticZoom = expanded ? Math.max(semanticZoom, 0.86) : Math.min(semanticZoom, 0.22);
+    spreadScale = expanded ? Math.max(spreadScale, 1) : Math.min(spreadScale, 1);
+  });
   if (window.ResizeObserver) {
     new ResizeObserver(resize).observe(host);
+  }
+  if (elBtnMapGesture) {
+    elBtnMapGesture.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (gesture.enabled || gesture.loading) {
+        stopGestureControl();
+      } else {
+        startGestureControl();
+      }
+    });
+    updateGestureButton();
   }
   host.addEventListener("pointermove", (event) => {
     syncPointerFromEvent(event);
@@ -1809,8 +2029,12 @@ function initEnergyFieldCanvas() {
   host.addEventListener("wheel", (event) => {
     event.preventDefault();
     const direction = event.deltaY < 0 ? 1 : -1;
+    targetSemanticZoom = Math.max(0, Math.min(1, targetSemanticZoom + direction * 0.18));
     spreadScale = Math.max(0.68, Math.min(1.45, spreadScale + direction * 0.08));
     targetEnergy = Math.max(0.72, Math.min(1.95, targetEnergy + direction * 0.035));
+    if (direction > 0 && !isExpandedMap() && targetSemanticZoom >= 0.68) {
+      setMapExpanded(true);
+    }
   }, { passive: false });
 
   if (resize()) {
