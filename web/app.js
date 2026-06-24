@@ -888,7 +888,7 @@ function initEnergyFieldCanvas() {
     { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
     { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
     { key: "strategy", symbol: "St", label: "策略版本", type: "BACKTEST", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86, metric: "EVOLVE" },
-    { key: "github", symbol: "Gh", label: "GitHub v0.4.9", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
+    { key: "github", symbol: "Gh", label: "GitHub v0.5.0", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
     { key: "log", symbol: "Lg", label: "工作日志", type: "LOG", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8, metric: "TRACE" },
     { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
@@ -1218,53 +1218,109 @@ function initEnergyFieldCanvas() {
       ctx.fillText("DUO CORE", core.x, core.y - 3);
       ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
       ctx.font = `500 9px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-      ctx.fillText(`v${state.version || "0.4.9"}`, core.x, core.y + 11);
+      ctx.fillText(`v${state.version || "0.5.0"}`, core.x, core.y + 11);
       ctx.textAlign = "start";
+    }
+  }
+
+  function projectSpatialPoint(x, y, z, fovFactor = isExpandedMap() ? 8.4 : 4.6) {
+    const expanded = isExpandedMap();
+    const yaw = orbit.yaw + (expanded ? Math.sin(core.spin * 0.12) * 0.035 : 0);
+    const cosY = Math.cos(yaw);
+    const sinY = Math.sin(yaw);
+    const x0 = x * cosY + z * sinY;
+    const z0 = -x * sinY + z * cosY;
+    const rotX = orbit.pitch + (expanded ? Math.sin(core.spin * 0.18) * 0.08 : Math.sin(core.spin * 0.36) * 0.22);
+    const cosX = Math.cos(rotX);
+    const sinX = Math.sin(rotX);
+    const y1 = y * cosX - z0 * sinX;
+    const z1 = y * sinX + z0 * cosX;
+    const fov = core.radius * fovFactor;
+    const scale = fov / (fov + z1);
+    return {
+      x: core.x + x0 * scale,
+      y: core.y + y1 * scale,
+      z: z1,
+      scale,
+      depth: Math.max(0, Math.min(1, (scale - 0.78) / 0.5)),
+    };
+  }
+
+  function strokeProjectedPolyline(points, color, baseAlpha, widthValue) {
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1];
+      const b = points[i];
+      const depthAlpha = 0.28 + ((a.depth + b.depth) * 0.5) * 0.72;
+      ctx.strokeStyle = `rgba(${color}, ${baseAlpha * depthAlpha})`;
+      ctx.lineWidth = Math.max(0.35, widthValue * (a.scale + b.scale) * 0.5);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
     }
   }
 
   function drawHologramSphere(now) {
     const expanded = isExpandedMap();
-    const radius = core.radius * (expanded ? 1.42 : 1.1);
+    const radius = core.radius * (expanded ? 1.68 : 1.1);
     const latitudes = expanded ? 7 : 5;
     const meridians = expanded ? 11 : 7;
+    const samples = expanded ? 72 : 48;
+    const fovFactor = expanded ? 6.2 : 4.2;
     ctx.save();
-    ctx.translate(core.x, core.y);
-    ctx.rotate(core.spin * 0.08 + orbit.yaw * 0.18);
     ctx.globalCompositeOperation = "lighter";
     ctx.lineWidth = expanded ? 1.05 : 0.8;
 
     for (let i = 1; i <= latitudes; i++) {
       const t = (i / (latitudes + 1)) * 2 - 1;
-      const y = t * radius * 0.58;
-      const rx = Math.sqrt(Math.max(0, 1 - t * t)) * radius;
-      ctx.strokeStyle = `rgba(125, 211, 252, ${0.065 + (1 - Math.abs(t)) * 0.045})`;
-      ctx.beginPath();
-      ctx.ellipse(0, y, rx, rx * 0.18, 0, 0, Math.PI * 2);
-      ctx.stroke();
+      const y = t * radius;
+      const ringRadius = Math.sqrt(Math.max(0, 1 - t * t)) * radius;
+      const points = [];
+      for (let s = 0; s <= samples; s++) {
+        const angle = (s / samples) * Math.PI * 2 + core.spin * 0.05;
+        points.push(projectSpatialPoint(Math.cos(angle) * ringRadius, y, Math.sin(angle) * ringRadius, fovFactor));
+      }
+      strokeProjectedPolyline(points, "125, 211, 252", 0.07 + (1 - Math.abs(t)) * 0.06, expanded ? 1.05 : 0.78);
     }
 
     for (let i = 0; i < meridians; i++) {
-      const angle = (i / meridians) * Math.PI + core.spin * 0.04;
-      ctx.strokeStyle = `rgba(56, 189, 248, ${i % 3 === 0 ? 0.12 : 0.07})`;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, radius, radius * 0.36, angle, 0, Math.PI * 2);
-      ctx.stroke();
+      const longitude = (i / meridians) * Math.PI * 2 + core.spin * 0.035;
+      const points = [];
+      for (let s = 0; s <= samples; s++) {
+        const latitude = -Math.PI * 0.5 + (s / samples) * Math.PI;
+        const bandRadius = Math.cos(latitude) * radius;
+        points.push(projectSpatialPoint(
+          Math.cos(longitude) * bandRadius,
+          Math.sin(latitude) * radius,
+          Math.sin(longitude) * bandRadius,
+          fovFactor,
+        ));
+      }
+      strokeProjectedPolyline(points, "56, 189, 248", i % 3 === 0 ? 0.11 : 0.065, expanded ? 0.95 : 0.7);
     }
 
     const scanAngle = core.spin * 0.46 + Math.sin(now * 0.0012) * 0.35;
-    ctx.strokeStyle = "rgba(186, 230, 253, 0.24)";
-    ctx.lineWidth = expanded ? 1.2 : 0.9;
-    ctx.beginPath();
-    ctx.moveTo(Math.cos(scanAngle) * -radius * 0.92, Math.sin(scanAngle) * -radius * 0.2);
-    ctx.lineTo(Math.cos(scanAngle) * radius * 0.92, Math.sin(scanAngle) * radius * 0.2);
-    ctx.stroke();
+    const scan = [];
+    for (let s = 0; s <= samples; s++) {
+      const t = -1 + (s / samples) * 2;
+      const z = Math.sqrt(Math.max(0, 1 - t * t)) * radius * Math.cos(scanAngle);
+      const y = Math.sqrt(Math.max(0, 1 - t * t)) * radius * 0.18 * Math.sin(scanAngle);
+      scan.push(projectSpatialPoint(t * radius * 0.92, y, z, fovFactor));
+    }
+    strokeProjectedPolyline(scan, "186, 230, 253", 0.22, expanded ? 1.2 : 0.9);
 
     if (expanded) {
       ctx.strokeStyle = "rgba(125, 211, 252, 0.12)";
       for (let i = 0; i < 4; i++) {
         const r = radius * (0.38 + i * 0.13);
-        ctx.strokeRect(-r * 0.72, -r * 0.72, r * 1.44, r * 1.44);
+        const corners = [
+          projectSpatialPoint(-r * 0.72, -r * 0.72, 0, fovFactor),
+          projectSpatialPoint(r * 0.72, -r * 0.72, 0, fovFactor),
+          projectSpatialPoint(r * 0.72, r * 0.72, 0, fovFactor),
+          projectSpatialPoint(-r * 0.72, r * 0.72, 0, fovFactor),
+          projectSpatialPoint(-r * 0.72, -r * 0.72, 0, fovFactor),
+        ];
+        strokeProjectedPolyline(corners, "125, 211, 252", 0.09, 0.82);
       }
     }
     ctx.restore();
@@ -1300,48 +1356,26 @@ function initEnergyFieldCanvas() {
     let y;
     let z;
 
-    if (expanded) {
-      const ring = 0.42 + node.lane * 0.19;
-      const angle = node.phase + core.spin * 0.08;
-      const spreadX = Math.min(width * 0.42, 560) * spreadScale;
-      const spreadY = Math.min(height * 0.34, 310) * spreadScale;
-      x = Math.cos(angle) * spreadX * ring;
-      y = Math.sin(angle) * spreadY * (0.42 + node.lane * 0.13);
-      z = Math.sin(angle + node.lane * 0.55) * core.radius * 0.55;
-    } else {
-      const v = -1 + (2 * index + 1) / total;
-      const phi = Math.acos(v);
-      const theta = node.phase + index * golden + core.spin * (0.68 + node.lane * 0.05);
-      const sphereRadius = core.radius * (0.86 + (index % 3) * 0.07) * Math.min(1.16, spreadScale);
-      x = Math.cos(theta) * Math.sin(phi) * sphereRadius;
-      y = Math.cos(phi) * sphereRadius * 0.84;
-      z = Math.sin(theta) * Math.sin(phi) * sphereRadius;
-    }
+    const v = -1 + (2 * index + 1) / total;
+    const phi = Math.acos(v);
+    const theta = node.phase + index * golden + core.spin * (expanded ? 0.18 + node.lane * 0.025 : 0.68 + node.lane * 0.05);
+    const baseRadius = expanded
+      ? Math.min(width * 0.3, height * 0.38, 430) * spreadScale * (0.88 + node.lane * 0.045)
+      : core.radius * (0.86 + (index % 3) * 0.07) * Math.min(1.16, spreadScale);
+    x = Math.cos(theta) * Math.sin(phi) * baseRadius;
+    y = Math.cos(phi) * baseRadius * (expanded ? 0.92 : 0.84);
+    z = Math.sin(theta) * Math.sin(phi) * baseRadius;
 
-    const yaw = orbit.yaw + (expanded ? Math.sin(core.spin * 0.12) * 0.035 : 0);
-    const cosY = Math.cos(yaw);
-    const sinY = Math.sin(yaw);
-    const x0 = x * cosY + z * sinY;
-    const z0 = -x * sinY + z * cosY;
-    const rotX = orbit.pitch + (expanded ? Math.sin(core.spin * 0.18) * 0.08 : Math.sin(core.spin * 0.36) * 0.22);
-    const cosX = Math.cos(rotX);
-    const sinX = Math.sin(rotX);
-    const y1 = y * cosX - z0 * sinX;
-    const z1 = y * sinX + z0 * cosX;
-    const fov = core.radius * (expanded ? 7.2 : 4.6);
-    const scale = fov / (fov + z1);
+    const projected = projectSpatialPoint(x, y, z, expanded ? 8.4 : 4.6);
     return {
       node,
-      x: core.x + x0 * scale,
-      y: core.y + y1 * scale,
-      z: z1,
-      scale,
-      radius: (expanded ? 10.4 : 8.6) * node.weight * Math.max(0.78, scale),
+      ...projected,
+      radius: (expanded ? 10.4 : 8.6) * node.weight * Math.max(0.72, projected.scale),
     };
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.4.9"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.5.0"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
@@ -1353,7 +1387,7 @@ function initEnergyFieldCanvas() {
     if (node.key === "codex") return state.codex_status || "idle";
     if (node.key === "tasks") return state.phase || "idle";
     if (node.key === "division") return state.division_status || "stable";
-    if (node.key === "github") return state.version || "0.4.9";
+    if (node.key === "github") return state.version || "0.5.0";
     return node.metric;
   }
 
@@ -1365,13 +1399,14 @@ function initEnergyFieldCanvas() {
       const a = byKey.get(aKey);
       const b = byKey.get(bKey);
       if (!a || !b) return;
-      const alpha = isExpandedMap() ? 0.24 : 0.15;
+      const depthAlpha = Math.max(0.35, (a.depth + b.depth) * 0.5);
+      const alpha = (isExpandedMap() ? 0.24 : 0.15) * depthAlpha;
       const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
       gradient.addColorStop(0, `${a.node.glow}11`);
       gradient.addColorStop(0.5, `rgba(125, 211, 252, ${alpha})`);
       gradient.addColorStop(1, `${b.node.glow}11`);
       ctx.strokeStyle = gradient;
-      ctx.lineWidth = Math.max(0.9, (a.scale + b.scale) * 0.42);
+      ctx.lineWidth = Math.max(0.55, (a.scale + b.scale) * 0.34 * depthAlpha);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       const mx = (a.x + b.x) * 0.5 + Math.sin(core.spin + a.x * 0.01) * 8;
@@ -1530,7 +1565,8 @@ function initEnergyFieldCanvas() {
     const node = item.node;
     const { size, w, h, x, y } = nodeModuleMetrics(item);
     const expanded = isExpandedMap();
-    const alpha = hover ? 0.96 : 0.76;
+    const depthAlpha = 0.44 + item.depth * 0.48;
+    const alpha = hover ? 0.96 : depthAlpha;
 
     const glow = ctx.createRadialGradient(item.x, item.y, 0, item.x, item.y, size * (hover ? 2.2 : 1.7));
     glow.addColorStop(0, `${node.color}ee`);
@@ -1544,7 +1580,7 @@ function initEnergyFieldCanvas() {
     ctx.fill();
 
     ctx.globalCompositeOperation = "source-over";
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = hover ? 1 : 0.72 + item.depth * 0.28;
     ctx.fillStyle = "rgba(5, 8, 16, 0.78)";
     ctx.strokeStyle = node.glow;
     ctx.lineWidth = hover ? 1.8 : 1.1;
@@ -1638,14 +1674,15 @@ function initEnergyFieldCanvas() {
   function shouldShowSemanticLabel(item, hover) {
     if (hover) return true;
     if (!isExpandedMap()) return false;
+    if (item.depth < 0.42) return false;
     if (width < 560) {
       return ["user", "codex", "tasks", "division", "investment"].includes(item.node.key);
     }
-    return true;
+    return item.depth > 0.54;
   }
 
   function getSemanticPositions(now) {
-    return semanticNodes.map((node) => semanticPosition(node, now)).sort((a, b) => b.z - a.z);
+    return semanticNodes.map((node) => semanticPosition(node, now)).sort((a, b) => a.scale - b.scale);
   }
 
   function drawSemanticNodes(positions, now) {
@@ -1712,7 +1749,7 @@ function initEnergyFieldCanvas() {
     const protocolRows = [
       { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
       { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },
-      { key: "BUILD", value: `v${state.version || "0.4.9"}`, color: "#e1e4ed", level: 0.84 },
+      { key: "BUILD", value: `v${state.version || "0.5.0"}`, color: "#e1e4ed", level: 0.84 },
     ];
     const systemRows = [
       { key: "MEMORY", value: "linked", color: "#a78bfa", level: 0.82 },

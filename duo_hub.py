@@ -24,7 +24,7 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
-APP_VERSION = "0.4.9"
+APP_VERSION = "0.5.0"
 GATEWAY_CACHE_TTL = int(os.environ.get("DUO_GATEWAY_CACHE_TTL", "30"))
 GATEWAY_CHECK_TIMEOUT = float(os.environ.get("DUO_GATEWAY_CHECK_TIMEOUT", "1"))
 
@@ -1221,8 +1221,11 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", len(data))
             self._send_cors_headers()
             self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.close_connection = True
             self.end_headers()
             self.wfile.write(data)
+            self.wfile.flush()
         except Exception as e:
             self._send_error(500, str(e))
 
@@ -1233,8 +1236,11 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", len(body))
         self._send_cors_headers()
         self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.end_headers()
         self.wfile.write(body)
+        self.wfile.flush()
 
     def _send_cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
