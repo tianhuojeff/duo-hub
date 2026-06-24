@@ -99,11 +99,11 @@ header,
 /* ====== 协作星图窗口 ====== */
 .star-map-window {
   margin: 10px 20px 0;
-  height: 172px;
-  border: 1px solid rgba(56, 189, 248, 0.38);
+  height: 206px;
+  border: 1px solid rgba(56, 189, 248, 0.46);
   border-radius: var(--radius);
-  background: rgba(8, 10, 18, 0.92);
-  box-shadow: inset 0 0 0 1px rgba(225, 228, 237, 0.06), 0 12px 32px rgba(0, 0, 0, 0.24);
+  background: rgba(5, 8, 16, 0.94);
+  box-shadow: inset 0 0 0 1px rgba(225, 228, 237, 0.06), 0 12px 32px rgba(0, 0, 0, 0.28), 0 0 32px rgba(14, 165, 233, 0.12);
   overflow: hidden;
   flex-shrink: 0;
 }
@@ -162,6 +162,24 @@ header,
   box-shadow: 0 0 16px var(--dot);
 }
 
+.map-expand {
+  width: 24px;
+  height: 24px;
+  margin-left: 8px;
+  border: 1px solid rgba(125, 211, 252, 0.38);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #bae6fd;
+  cursor: pointer;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.map-expand:hover {
+  border-color: rgba(125, 211, 252, 0.72);
+  background: rgba(14, 165, 233, 0.18);
+}
+
 .map-viewport {
   position: relative;
   height: calc(100% - 34px);
@@ -169,10 +187,10 @@ header,
   touch-action: none;
   overflow: hidden;
   background:
-    linear-gradient(rgba(56, 189, 248, 0.13) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(56, 189, 248, 0.13) 1px, transparent 1px),
-    radial-gradient(circle at 50% 50%, rgba(56, 189, 248, 0.18), transparent 60%),
-    #0a0c14;
+    linear-gradient(rgba(56, 189, 248, 0.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.09) 1px, transparent 1px),
+    radial-gradient(circle at 50% 50%, rgba(14, 165, 233, 0.24), rgba(14, 165, 233, 0.05) 34%, transparent 68%),
+    #050814;
   background-size: 42px 42px, 42px 42px, 100% 100%, 100% 100%;
 }
 
@@ -186,16 +204,16 @@ header,
 }
 
 .map-viewport::before {
-  background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.32), transparent);
-  width: 26%;
+  background: linear-gradient(90deg, transparent, rgba(125, 211, 252, 0.26), transparent);
+  width: 22%;
   transform: translateX(-120%);
   animation: mapSweep 7s linear infinite;
 }
 
 .map-viewport::after {
-  border-top: 1px solid rgba(56, 189, 248, 0.22);
-  border-bottom: 1px solid rgba(56, 189, 248, 0.22);
-  box-shadow: inset 0 0 40px rgba(56, 189, 248, 0.14);
+  border-top: 1px solid rgba(56, 189, 248, 0.18);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.18);
+  box-shadow: inset 0 0 56px rgba(56, 189, 248, 0.16);
 }
 
 .map-reticle {
@@ -205,7 +223,7 @@ header,
   z-index: 3;
   width: 92px;
   height: 92px;
-  border: 1px solid rgba(56, 189, 248, 0.48);
+  border: 1px solid rgba(56, 189, 248, 0.28);
   border-radius: 50%;
   transform: translate(-50%, -50%);
   pointer-events: none;
@@ -215,7 +233,7 @@ header,
 .map-reticle::after {
   content: "";
   position: absolute;
-  background: rgba(56, 189, 248, 0.48);
+  background: rgba(56, 189, 248, 0.24);
 }
 
 .map-reticle::before {
@@ -234,6 +252,39 @@ header,
 
 @keyframes mapSweep {
   to { transform: translateX(470%); }
+}
+
+.star-map-window.is-expanded {
+  position: fixed;
+  inset: 14px;
+  z-index: 50;
+  height: auto;
+  margin: 0;
+  border-color: rgba(125, 211, 252, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(225, 228, 237, 0.08), 0 28px 80px rgba(0, 0, 0, 0.62), 0 0 64px rgba(14, 165, 233, 0.22);
+}
+
+.star-map-window.is-expanded .map-header {
+  height: 42px;
+}
+
+.star-map-window.is-expanded .map-viewport {
+  height: calc(100% - 42px);
+}
+
+.star-map-window.is-expanded .map-expand {
+  color: #fff;
+  border-color: rgba(125, 211, 252, 0.9);
+  background: rgba(14, 165, 233, 0.24);
+}
+
+body.map-immersive::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 49;
+  background: rgba(1, 4, 12, 0.78);
+  backdrop-filter: blur(10px);
 }
 
 /* ====== 三栏AI面板 ====== */
@@ -562,7 +613,7 @@ header,
     opacity: 1;
   }
   .star-map-window {
-    height: 142px;
+    height: 156px;
     margin: 8px 8px 0;
   }
   .map-header {
@@ -585,6 +636,11 @@ header,
     gap: 0;
     font-size: 0;
   }
+  .map-expand {
+    width: 26px;
+    height: 24px;
+    margin-left: 4px;
+  }
   .map-viewport {
     height: calc(100% - 32px);
     background-size: 34px 34px, 34px 34px, 100% 100%, 100% 100%;
@@ -592,6 +648,15 @@ header,
   .map-reticle {
     width: 72px;
     height: 72px;
+  }
+  .star-map-window.is-expanded {
+    inset: 8px;
+  }
+  .star-map-window.is-expanded .map-header {
+    height: 38px;
+  }
+  .star-map-window.is-expanded .map-viewport {
+    height: calc(100% - 38px);
   }
   .topbar {
     align-items: flex-start;

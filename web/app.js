@@ -31,6 +31,9 @@ const elGwCcmr = $("#gw-ccmr");
 const elGwLobster = $("#gw-lobster");
 const elGwCodex = $("#gw-codex");
 const elGraphCanvas = $("#graph-canvas");
+const elStarMapWindow = $(".star-map-window");
+const elMapViewport = $("#star-map-viewport");
+const elBtnMapExpand = $("#btn-map-expand");
 
 let state = {
   phase: "idle",
@@ -387,8 +390,43 @@ elClaudeModel.addEventListener("change", () => setModel("claude", elClaudeModel.
 elLobsterModel.addEventListener("change", () => setModel("lobster", elLobsterModel.value));
 elCodexModel.addEventListener("change", () => setModel("codex", elCodexModel.value));
 
+function setMapExpanded(expanded) {
+  if (!elStarMapWindow || !elBtnMapExpand) return;
+  elStarMapWindow.classList.toggle("is-expanded", expanded);
+  document.body.classList.toggle("map-immersive", expanded);
+  elBtnMapExpand.textContent = expanded ? "×" : "⛶";
+  elBtnMapExpand.title = expanded ? "收起星图" : "放大星图";
+  elBtnMapExpand.setAttribute("aria-label", expanded ? "收起星图" : "放大星图");
+  window.requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+}
+
+if (elBtnMapExpand) {
+  elBtnMapExpand.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setMapExpanded(!elStarMapWindow.classList.contains("is-expanded"));
+  });
+}
+
+if (elMapViewport) {
+  elMapViewport.addEventListener("click", () => {
+    if (!elStarMapWindow.classList.contains("is-expanded")) {
+      setMapExpanded(true);
+    }
+  });
+}
+
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && elStarMapWindow && elStarMapWindow.classList.contains("is-expanded")) {
+    setMapExpanded(false);
+  }
+});
+
+if (location.hash === "#star-map") {
+  window.requestAnimationFrame(() => setMapExpanded(true));
+}
+
 // === 启动 ===
-initGraphCanvas();
+initEnergyFieldCanvas();
 fetchState();
 setInterval(fetchState, POLL_INTERVAL);
 console.log("⚡ Duo Hub 三方前端已就绪");
@@ -732,6 +770,512 @@ function initGraphCanvas() {
 
   if (resize()) {
     updateParticles(1);
+    draw(performance.now());
+  }
+  window.requestAnimationFrame((now) => {
+    resize();
+    lastTime = now;
+    animate(now);
+  });
+}
+
+function initEnergyFieldCanvas() {
+  if (!elGraphCanvas) return;
+  const ctx = elGraphCanvas.getContext("2d");
+  const host = elGraphCanvas.parentElement || elGraphCanvas;
+  if (!ctx || !host) return;
+
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const particles = [];
+  const pulses = [];
+  const dragTrail = [];
+  const pointers = new Map();
+  const palette = [
+    { core: "#ffffff", glow: "#7dd3fc" },
+    { core: "#e0f2fe", glow: "#38bdf8" },
+    { core: "#dbeafe", glow: "#0ea5e9" },
+    { core: "#cffafe", glow: "#22d3ee" },
+    { core: "#f0fbff", glow: "#60a5fa" },
+  ];
+  const core = {
+    x: 0,
+    y: 0,
+    tx: 0,
+    ty: 0,
+    vx: 0,
+    vy: 0,
+    radius: 60,
+    spin: 0,
+    energy: 0.86,
+    compression: 1,
+  };
+  const pointer = {
+    x: 0,
+    y: 0,
+    lastX: 0,
+    lastY: 0,
+    vx: 0,
+    vy: 0,
+    active: false,
+    down: false,
+    strength: 0,
+    lastMove: 0,
+  };
+  let width = 0;
+  let height = 0;
+  let dpr = 1;
+  let lastTime = performance.now();
+  let targetEnergy = 0.86;
+  let lastPinchDistance = null;
+
+  function resize() {
+    const rect = host.getBoundingClientRect();
+    if (rect.width < 20 || rect.height < 20) {
+      window.requestAnimationFrame(resize);
+      return false;
+    }
+
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const nextWidth = Math.floor(rect.width);
+    const nextHeight = Math.floor(rect.height);
+    const changed = Math.abs(nextWidth - width) > 1 || Math.abs(nextHeight - height) > 1;
+    width = nextWidth;
+    height = nextHeight;
+    core.radius = Math.max(44, Math.min(elStarMapWindow && elStarMapWindow.classList.contains("is-expanded") ? 180 : 96, Math.min(width, height) * 0.45));
+
+    if (changed) {
+      core.x = width * 0.5;
+      core.y = height * 0.5;
+      core.tx = core.x;
+      core.ty = core.y;
+      if (!pointer.active) {
+        pointer.x = core.x;
+        pointer.y = core.y;
+        pointer.lastX = pointer.x;
+        pointer.lastY = pointer.y;
+      }
+    } else if (!core.x && !core.y) {
+      core.x = width * 0.5;
+      core.y = height * 0.5;
+      core.tx = core.x;
+      core.ty = core.y;
+      pointer.x = core.x;
+      pointer.y = core.y;
+      pointer.lastX = pointer.x;
+      pointer.lastY = pointer.y;
+    }
+
+    elGraphCanvas.width = Math.floor(width * dpr);
+    elGraphCanvas.height = Math.floor(height * dpr);
+    elGraphCanvas.style.width = "100%";
+    elGraphCanvas.style.height = "100%";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const targetCount = Math.max(220, Math.min(elStarMapWindow && elStarMapWindow.classList.contains("is-expanded") ? 920 : 560, Math.floor((width * height) / 470)));
+    if (changed || Math.abs(particles.length - targetCount) > 28) {
+      particles.length = 0;
+      for (let i = 0; i < targetCount; i++) {
+        particles.push(makeParticle());
+      }
+    }
+    updateParticles(1, performance.now());
+    draw(performance.now());
+    return true;
+  }
+
+  function randomAnchor() {
+    const theta = Math.random() * Math.PI * 2;
+    const phi = Math.acos(Math.random() * 2 - 1);
+    const shell = Math.pow(Math.random(), 0.42);
+    const radius = core.radius * (0.18 + shell * 0.98);
+    return {
+      x: Math.sin(phi) * Math.cos(theta) * radius,
+      y: Math.cos(phi) * radius * 0.74,
+      z: Math.sin(phi) * Math.sin(theta) * radius,
+    };
+  }
+
+  function makeParticle() {
+    const anchor = randomAnchor();
+    const color = palette[Math.floor(Math.random() * palette.length)];
+    return {
+      ax: anchor.x,
+      ay: anchor.y,
+      az: anchor.z,
+      x: anchor.x,
+      y: anchor.y,
+      z: anchor.z,
+      vx: 0,
+      vy: 0,
+      vz: 0,
+      sx: core.x + anchor.x,
+      sy: core.y + anchor.y,
+      psx: core.x + anchor.x,
+      psy: core.y + anchor.y,
+      seed: Math.random() * 1000,
+      spin: 0.7 + Math.random() * 0.95,
+      size: 0.72 + Math.random() * 1.9,
+      alpha: 0.58 + Math.random() * 0.42,
+      color,
+    };
+  }
+
+  function activePointer() {
+    if (!pointers.size) return null;
+    const points = Array.from(pointers.values());
+    const sum = points.reduce((acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }), { x: 0, y: 0 });
+    return { x: sum.x / points.length, y: sum.y / points.length };
+  }
+
+  function updatePointer(now) {
+    const point = activePointer();
+    if (point) {
+      pointer.lastX = pointer.x;
+      pointer.lastY = pointer.y;
+      pointer.x += (point.x - pointer.x) * 0.44;
+      pointer.y += (point.y - pointer.y) * 0.44;
+      pointer.vx = pointer.x - pointer.lastX;
+      pointer.vy = pointer.y - pointer.lastY;
+      pointer.active = true;
+      pointer.lastMove = now;
+      targetEnergy = pointer.down ? 1.74 : 1.24;
+
+      if (Math.hypot(pointer.vx, pointer.vy) > 0.7) {
+        dragTrail.push({ x: pointer.x, y: pointer.y, life: 1 });
+        if (dragTrail.length > 26) dragTrail.shift();
+      }
+    } else if (now - pointer.lastMove > 850) {
+      pointer.active = false;
+      pointer.down = false;
+      pointer.vx *= 0.85;
+      pointer.vy *= 0.85;
+      targetEnergy = 0.86;
+    }
+    pointer.strength += ((pointer.active ? 1 : 0) - pointer.strength) * 0.07;
+    core.energy += (targetEnergy - core.energy) * 0.045;
+  }
+
+  function updateCore(dt) {
+    const idleX = width * 0.5;
+    const idleY = height * 0.5;
+    core.tx = idleX + (pointer.x - idleX) * pointer.strength * 0.84;
+    core.ty = idleY + (pointer.y - idleY) * pointer.strength * 0.84;
+    core.vx += (core.tx - core.x) * 0.07 * dt;
+    core.vy += (core.ty - core.y) * 0.07 * dt;
+    core.vx *= 0.78;
+    core.vy *= 0.78;
+    core.x += core.vx * dt;
+    core.y += core.vy * dt;
+
+    const targetCompression = pointer.down ? 0.56 : pointer.active ? 0.73 : 1;
+    core.compression += (targetCompression - core.compression) * 0.055 * dt;
+    core.spin += (0.008 + core.energy * 0.012) * dt;
+  }
+
+  function rotatedAnchor(point, now) {
+    const wobble = Math.sin(now * 0.0018 + point.seed) * core.radius * 0.035 * core.energy;
+    let x = (point.ax + Math.cos(point.seed + now * 0.0012) * wobble) * core.compression;
+    let y = (point.ay + Math.sin(point.seed * 1.7 + now * 0.0015) * wobble) * core.compression;
+    let z = (point.az + Math.cos(point.seed * 0.7 + now * 0.0013) * wobble) * core.compression;
+
+    const rotY = core.spin * point.spin;
+    const cosY = Math.cos(rotY);
+    const sinY = Math.sin(rotY);
+    const x1 = x * cosY + z * sinY;
+    const z1 = -x * sinY + z * cosY;
+
+    const rotX = Math.sin(core.spin * 0.62 + point.seed) * 0.32;
+    const cosX = Math.cos(rotX);
+    const sinX = Math.sin(rotX);
+    return {
+      x: x1,
+      y: y * cosX - z1 * sinX,
+      z: y * sinX + z1 * cosX,
+    };
+  }
+
+  function project(point) {
+    const fov = core.radius * 4.7;
+    const scale = fov / (fov + point.z);
+    return {
+      x: core.x + point.x * scale,
+      y: core.y + point.y * scale,
+      scale,
+    };
+  }
+
+  function updateParticles(dt, now) {
+    updateCore(dt);
+    particles.forEach((point) => {
+      const target = rotatedAnchor(point, now);
+      const spring = 0.026 + core.energy * 0.006;
+      point.vx += (target.x - point.x) * spring * dt;
+      point.vy += (target.y - point.y) * spring * dt;
+      point.vz += (target.z - point.z) * spring * dt;
+
+      const projected = project(point);
+      if (pointer.strength > 0.01) {
+        const dx = pointer.x - projected.x;
+        const dy = pointer.y - projected.y;
+        const dist = Math.max(18, Math.hypot(dx, dy));
+        const radius = core.radius * (pointer.down ? 4.3 : 3.25);
+        if (dist < radius) {
+          const falloff = Math.pow(1 - dist / radius, 2);
+          const pull = (pointer.down ? 0.14 : 0.066) * falloff * pointer.strength;
+          const tangent = (pointer.down ? 0.2 : 0.12) * falloff * pointer.strength;
+          const drag = Math.min(1.9, Math.hypot(pointer.vx, pointer.vy) / 8) * falloff;
+          point.vx += ((dx / dist) * pull - (dy / dist) * tangent + pointer.vx * 0.018 * drag) * dt;
+          point.vy += ((dy / dist) * pull + (dx / dist) * tangent + pointer.vy * 0.018 * drag) * dt;
+          point.vz += (pointer.down ? -0.34 : 0.14) * falloff * dt;
+        }
+      }
+
+      point.x += point.vx * dt;
+      point.y += point.vy * dt;
+      point.z += point.vz * dt;
+      point.vx *= 0.88;
+      point.vy *= 0.88;
+      point.vz *= 0.88;
+
+      const next = project(point);
+      point.psx = Number.isFinite(point.sx) ? point.sx : next.x;
+      point.psy = Number.isFinite(point.sy) ? point.sy : next.y;
+      point.sx = next.x;
+      point.sy = next.y;
+      point.scale = next.scale;
+    });
+
+    for (let i = pulses.length - 1; i >= 0; i--) {
+      const pulse = pulses[i];
+      pulse.life -= 0.022 * dt;
+      pulse.radius += (6.5 + pulse.force * 4.5) * dt;
+      if (pulse.life <= 0) pulses.splice(i, 1);
+    }
+    for (let i = dragTrail.length - 1; i >= 0; i--) {
+      dragTrail[i].life -= 0.035 * dt;
+      if (dragTrail[i].life <= 0) dragTrail.splice(i, 1);
+    }
+  }
+
+  function drawCoreAura(now) {
+    const pulse = 1 + Math.sin(now * 0.004) * 0.05 + pointer.strength * 0.18;
+    const auraRadius = core.radius * (2.15 + pointer.strength * 0.7);
+    const aura = ctx.createRadialGradient(core.x, core.y, 0, core.x, core.y, auraRadius);
+    aura.addColorStop(0, "rgba(240, 251, 255, 0.92)");
+    aura.addColorStop(0.08, "rgba(125, 211, 252, 0.6)");
+    aura.addColorStop(0.35, "rgba(14, 165, 233, 0.24)");
+    aura.addColorStop(1, "rgba(14, 165, 233, 0)");
+    ctx.globalAlpha = 0.95;
+    ctx.fillStyle = aura;
+    ctx.beginPath();
+    ctx.arc(core.x, core.y, auraRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.lineWidth = 1.2;
+    for (let i = 0; i < 3; i++) {
+      const radius = core.radius * (0.86 + i * 0.28) * pulse;
+      ctx.strokeStyle = `rgba(125, 211, 252, ${0.28 - i * 0.055})`;
+      ctx.beginPath();
+      ctx.ellipse(core.x, core.y, radius, radius * (0.45 + i * 0.08), core.spin * (0.45 + i * 0.16), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  function drawDragTrail() {
+    if (dragTrail.length < 2) return;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    for (let i = 1; i < dragTrail.length; i++) {
+      const a = dragTrail[i - 1];
+      const b = dragTrail[i];
+      const alpha = Math.min(a.life, b.life) * 0.46;
+      if (alpha <= 0) continue;
+      const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+      gradient.addColorStop(0, `rgba(59, 130, 246, ${alpha * 0.15})`);
+      gradient.addColorStop(1, `rgba(125, 211, 252, ${alpha})`);
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = 8 * alpha + 1;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    }
+  }
+
+  function drawParticle(point, now) {
+    const speed = Math.hypot(point.sx - point.psx, point.sy - point.psy);
+    const depth = Math.max(0.45, Math.min(1.55, point.scale || 1));
+    const flicker = 0.78 + Math.sin(now * 0.003 + point.seed) * 0.22;
+    const alpha = Math.min(1, point.alpha * flicker * (0.62 + depth * 0.28) * (0.92 + pointer.strength * 0.24));
+    const radius = point.size * depth * (1.35 + pointer.strength * 0.32);
+
+    if (speed > 0.35) {
+      ctx.globalAlpha = Math.min(0.48, speed * 0.045) * alpha;
+      ctx.strokeStyle = point.color.glow;
+      ctx.lineWidth = Math.max(1, radius * 0.65);
+      ctx.beginPath();
+      ctx.moveTo(point.psx, point.psy);
+      ctx.lineTo(point.sx, point.sy);
+      ctx.stroke();
+    }
+
+    const glowRadius = radius * (6 + core.energy * 1.7);
+    const gradient = ctx.createRadialGradient(point.sx, point.sy, 0, point.sx, point.sy, glowRadius);
+    gradient.addColorStop(0, `${point.color.core}ff`);
+    gradient.addColorStop(0.22, `${point.color.glow}d8`);
+    gradient.addColorStop(0.62, `${point.color.glow}42`);
+    gradient.addColorStop(1, `${point.color.glow}00`);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.arc(point.sx, point.sy, glowRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = Math.min(1, alpha + 0.26);
+    ctx.fillStyle = point.color.core;
+    ctx.beginPath();
+    ctx.arc(point.sx, point.sy, Math.max(0.75, radius * 0.56), 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawForceField(now) {
+    if (pointer.strength < 0.02) return;
+    const pulse = Math.sin(now * 0.008) * 7;
+    const base = core.radius * (pointer.down ? 0.86 : 0.68);
+    ctx.save();
+    ctx.translate(pointer.x, pointer.y);
+    ctx.rotate(now * 0.0011);
+    for (let i = 0; i < 4; i++) {
+      ctx.globalAlpha = (0.48 - i * 0.075) * pointer.strength;
+      ctx.strokeStyle = i % 2 ? "#38bdf8" : "#a5f3fc";
+      ctx.lineWidth = 1.35;
+      ctx.beginPath();
+      ctx.arc(0, 0, base + i * 14 + pulse, i * 0.62, Math.PI * 1.35 + i * 0.62);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawPulses() {
+    pulses.forEach((pulse) => {
+      const alpha = Math.max(0, pulse.life);
+      ctx.globalAlpha = alpha * 0.74;
+      ctx.strokeStyle = pulse.color;
+      ctx.lineWidth = 1.9 + pulse.force * 1.2;
+      ctx.beginPath();
+      ctx.arc(pulse.x, pulse.y, pulse.radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = alpha * 0.24;
+      ctx.beginPath();
+      ctx.arc(pulse.x, pulse.y, pulse.radius * 0.55, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+  }
+
+  function draw(now) {
+    ctx.clearRect(0, 0, width, height);
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineCap = "round";
+    drawCoreAura(now);
+    drawDragTrail();
+    particles.slice().sort((a, b) => b.z - a.z).forEach((point) => drawParticle(point, now));
+    drawForceField(now);
+    drawPulses();
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  function animate(now) {
+    const dt = Math.min(2.2, Math.max(0.55, (now - lastTime) / 16.67));
+    lastTime = now;
+    updatePointer(now);
+    updateParticles(dt, now);
+    draw(now);
+    if (reduceMotion) {
+      window.setTimeout(() => window.requestAnimationFrame(animate), 120);
+    } else {
+      window.requestAnimationFrame(animate);
+    }
+  }
+
+  function addPulse(x, y, force = 1) {
+    pulses.push({
+      x,
+      y,
+      force,
+      radius: core.radius * 0.28,
+      life: 1,
+      color: force > 1.2 ? "#7dd3fc" : "#38bdf8",
+    });
+    if (pulses.length > 8) pulses.shift();
+  }
+
+  function localPoint(event) {
+    const rect = host.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(width, event.clientX - rect.left)),
+      y: Math.max(0, Math.min(height, event.clientY - rect.top)),
+    };
+  }
+
+  function syncPointerFromEvent(event) {
+    pointers.set(event.pointerId, localPoint(event));
+  }
+
+  function updatePinchEnergy() {
+    if (pointers.size === 2) {
+      const points = Array.from(pointers.values());
+      const distance = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+      if (lastPinchDistance !== null) {
+        targetEnergy = Math.max(0.72, Math.min(1.95, targetEnergy + (distance - lastPinchDistance) * 0.004));
+      }
+      lastPinchDistance = distance;
+    } else {
+      lastPinchDistance = null;
+    }
+  }
+
+  window.addEventListener("resize", resize);
+  if (window.ResizeObserver) {
+    new ResizeObserver(resize).observe(host);
+  }
+  host.addEventListener("pointermove", (event) => {
+    syncPointerFromEvent(event);
+    updatePinchEnergy();
+  }, { passive: true });
+  host.addEventListener("pointerdown", (event) => {
+    pointer.down = true;
+    syncPointerFromEvent(event);
+    updatePinchEnergy();
+    const point = localPoint(event);
+    addPulse(point.x, point.y, 1.4);
+    try { host.setPointerCapture(event.pointerId); } catch (err) {}
+  }, { passive: true });
+  window.addEventListener("pointerup", (event) => {
+    pointers.delete(event.pointerId);
+    pointer.down = pointers.size > 0;
+    lastPinchDistance = null;
+    const point = localPoint(event);
+    addPulse(point.x, point.y, 0.8);
+  }, { passive: true });
+  window.addEventListener("pointercancel", (event) => {
+    pointers.delete(event.pointerId);
+    pointer.down = pointers.size > 0;
+    lastPinchDistance = null;
+  }, { passive: true });
+  host.addEventListener("pointerleave", (event) => {
+    if (!pointer.down) {
+      pointers.delete(event.pointerId);
+      lastPinchDistance = null;
+    }
+  }, { passive: true });
+  host.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    targetEnergy = Math.max(0.72, Math.min(1.95, targetEnergy + (event.deltaY < 0 ? 0.08 : -0.08)));
+  }, { passive: false });
+
+  if (resize()) {
+    updateParticles(1, performance.now());
     draw(performance.now());
   }
   window.requestAnimationFrame((now) => {
