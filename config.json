@@ -1,6 +1,7 @@
 {
   "protocol_dir": "",
   "claude_workspace": "",
+  "codex_workspace": "",
   "ccmr_port": "8080",
   "openclaw_port": "18789"
 }

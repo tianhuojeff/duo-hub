@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Duo Hub — 双AI协作中心
-一键启动，让 Claude Code 和 龙虾(OpenClaw) 同时看到你的需求并协商分工
+Duo Hub — 三AI协作中心
+一键启动，让 Claude Code、龙虾(OpenClaw) 和 Codex 同时看到你的需求并协商分工
 """
 
 import http.server
@@ -10,6 +10,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -25,13 +26,15 @@ PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
 
 def _load_config():
-    """加载配置，优先环境变量，其次 config.json，最后自动检测"""
+    """加载配置，优先环境变量，其次 config.local.json/config.json，最后自动检测"""
     config = {}
-    config_file = Path(__file__).parent / "config.json"
-    if config_file.exists():
+    for filename in ("config.json", "config.local.json"):
+        config_file = Path(__file__).parent / filename
+        if not config_file.exists():
+            continue
         try:
             with open(config_file, "r", encoding="utf-8") as f:
-                config = json.load(f)
+                config.update(json.load(f))
         except Exception:
             pass
 
@@ -46,6 +49,10 @@ def _load_config():
     claude_ws = os.environ.get("DUO_CLAUDE_WORKSPACE", config.get("claude_workspace", ""))
     CLAUDE_WORKSPACE = Path(claude_ws) if claude_ws else Path.cwd()
 
+    # Codex 工作区
+    codex_ws = os.environ.get("DUO_CODEX_WORKSPACE", config.get("codex_workspace", ""))
+    CODEX_WORKSPACE = Path(codex_ws) if codex_ws else Path.cwd()
+
     # Web 目录
     WEB_DIR = Path(__file__).parent / "web"
 
@@ -53,15 +60,31 @@ def _load_config():
     CCMR_PORT = int(os.environ.get("DUO_CCMR_PORT", config.get("ccmr_port", "8080")))
     OPENCLAW_PORT = int(os.environ.get("DUO_OPENCLAW_PORT", config.get("openclaw_port", "18789")))
 
-    return PROTOCOL_DIR, CLAUDE_WORKSPACE, WEB_DIR, CCMR_PORT, OPENCLAW_PORT
+    return PROTOCOL_DIR, CLAUDE_WORKSPACE, CODEX_WORKSPACE, WEB_DIR, CCMR_PORT, OPENCLAW_PORT
 
-PROTOCOL_DIR, CLAUDE_WORKSPACE, WEB_DIR, CCMR_PORT, OPENCLAW_PORT = _load_config()
+PROTOCOL_DIR, CLAUDE_WORKSPACE, CODEX_WORKSPACE, WEB_DIR, CCMR_PORT, OPENCLAW_PORT = _load_config()
 
 INBOX_FILE = PROTOCOL_DIR / "inbox" / "current_task.txt"
 OUTBOX_CLAUDE = PROTOCOL_DIR / "outbox" / "claude.md"
 OUTBOX_LOBSTER = PROTOCOL_DIR / "outbox" / "lobster.md"
+OUTBOX_CODEX = PROTOCOL_DIR / "outbox" / "codex.md"
 SESSION_FILE = PROTOCOL_DIR / "session.json"
 CHAT_FILE = PROTOCOL_DIR / "chat.json"
+
+AI_ORDER = ("claude", "lobster", "codex")
+TERMINAL_STATUSES = ("done", "timeout", "error")
+AI_LABELS = {
+    "user": "天火大人",
+    "claude": "Claude Code",
+    "lobster": "龙虾 (OpenClaw)",
+    "codex": "Codex",
+    "system": "系统",
+}
+OUTBOX_FILES = {
+    "claude": OUTBOX_CLAUDE,
+    "lobster": OUTBOX_LOBSTER,
+    "codex": OUTBOX_CODEX,
+}
 
 
 def _find_tool(name, env_var, known_paths):
@@ -99,6 +122,21 @@ for _base in [str(Path.home() / "AppData" / "Local" / "pnpm" / "global")]:
     _oc_candidates.extend(_matches)
 OPENCLAW_CMD = _find_tool("openclaw", "DUO_OPENCLAW_CMD", _oc_candidates)
 
+# 自动检测 Codex。Windows 后台进程优先使用 codex.cmd，避免误执行无扩展名 npm shim。
+_codex_candidates = [
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "codex.cmd"),
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "codex.exe"),
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "codex.ps1"),
+]
+CODEX_CMD = _find_tool("codex.cmd", "DUO_CODEX_CMD", _codex_candidates)
+
+
+def _codex_cmd_parts():
+    path = Path(CODEX_CMD)
+    if path.suffix.lower() == ".ps1":
+        return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(path)]
+    return [str(path)]
+
 # 构建子进程环境
 _ENV = os.environ.copy()
 _npm_bin = str(Path.home() / "AppData" / "Roaming" / "npm")
@@ -122,6 +160,8 @@ if _oc_node_paths:
 class DuoHub:
     def __init__(self):
         self.lock = threading.Lock()
+        self._gateway_cache = None
+        self._gateway_cache_at = 0
         self._ensure_dirs()
         self._init_session()
         self._init_chat()
@@ -140,6 +180,7 @@ class DuoHub:
                 self.session = self._new_session()
         else:
             self.session = self._new_session()
+        self._normalize_session()
         self._save_session()
 
     def _new_session(self):
@@ -149,11 +190,25 @@ class DuoHub:
             "round": 0,
             "claude_status": "idle",
             "lobster_status": "idle",
+            "codex_status": "idle",
             "claude_model": "deepseek-v4-pro",
             "lobster_model": "deepseek/deepseek-v4-flash",  # DeepSeek 比 GPT 快且便宜
+            "codex_model": "",
             "active_task_id": None,
             "created_at": datetime.now().isoformat(),
         }
+
+    def _normalize_session(self):
+        """兼容旧的双人 session，补齐三方状态字段。"""
+        self.session.setdefault("phase", "idle")
+        self.session.setdefault("round", 0)
+        self.session.setdefault("active_task_id", None)
+        self.session.setdefault("created_at", datetime.now().isoformat())
+        self.session.setdefault("claude_model", "deepseek-v4-pro")
+        self.session.setdefault("lobster_model", "deepseek/deepseek-v4-flash")
+        self.session.setdefault("codex_model", "")
+        for ai in AI_ORDER:
+            self.session.setdefault(f"{ai}_status", "idle")
 
     def _init_chat(self):
         if CHAT_FILE.exists():
@@ -182,10 +237,17 @@ class DuoHub:
 
     # ---- 网关检测 ----
     def check_gateways(self):
-        return {
+        now = time.time()
+        if self._gateway_cache and now - self._gateway_cache_at < 5:
+            return self._gateway_cache
+
+        self._gateway_cache = {
             "ccmr": self._port_open(CCMR_PORT),
             "openclaw": self._port_open(OPENCLAW_PORT),
+            "codex": self._codex_available(),
         }
+        self._gateway_cache_at = now
+        return self._gateway_cache
 
     @staticmethod
     def _port_open(port):
@@ -195,6 +257,22 @@ class DuoHub:
             s.connect(("127.0.0.1", port))
             s.close()
             return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _codex_available():
+        try:
+            result = subprocess.run(
+                _codex_cmd_parts() + ["--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                encoding="utf-8",
+                errors="replace",
+                env=_ENV,
+            )
+            return result.returncode == 0
         except Exception:
             return False
 
@@ -223,23 +301,18 @@ class DuoHub:
         ctx = ""
         if recent:
             ctx = "\n\n## 对话上下文\n\n"
-            labels = {
-                "user": "天火大人",
-                "claude": "Claude Code",
-                "lobster": "龙虾 (OpenClaw)",
-                "system": "系统",
-            }
             for m in recent:
-                role_label = labels.get(m["role"], m["role"])
+                role_label = AI_LABELS.get(m["role"], m["role"])
                 ctx += f"**{role_label}**: {m['content']}\n\n"
 
         header = (
             "# Duo Hub 协作任务\n\n"
-            "你正在双AI协作中心工作，搭档是另一方 AI。天火大人通过 Duo Hub 同时与你们两个交互。\n\n"
+            "你正在三AI协作中心工作，搭档是 Claude Code、OpenClaw「龙虾」和 Codex。"
+            "天火大人通过 Duo Hub 同时与你们三个交互。\n\n"
             "工作规则：\n"
             "1. 分析任务需求，给出你的方案\n"
             "2. 标注你擅长的部分和需要对方配合的部分\n"
-            "3. 如果是协商，请明确提出分工建议（格式：- XX负责：xxx）\n"
+            "3. 如果是协商，请明确提出三方分工建议（格式：- XX负责：xxx）\n"
             "4. 回复使用中文，结构清晰\n\n"
             "---\n\n"
             "# 当前任务\n\n"
@@ -249,8 +322,13 @@ class DuoHub:
         with open(INBOX_FILE, "w", encoding="utf-8") as f:
             f.write(content)
 
+    def outbox_for(self, ai_name):
+        if ai_name not in OUTBOX_FILES:
+            raise ValueError(f"未知 AI: {ai_name}")
+        return OUTBOX_FILES[ai_name]
+
     def read_outbox(self, ai_name):
-        outbox = OUTBOX_CLAUDE if ai_name == "claude" else OUTBOX_LOBSTER
+        outbox = self.outbox_for(ai_name)
         if outbox.exists():
             try:
                 with open(outbox, "r", encoding="utf-8") as f:
@@ -260,7 +338,7 @@ class DuoHub:
         return None
 
     def get_outbox_mtime(self, ai_name):
-        outbox = OUTBOX_CLAUDE if ai_name == "claude" else OUTBOX_LOBSTER
+        outbox = self.outbox_for(ai_name)
         if outbox.exists():
             try:
                 return outbox.stat().st_mtime
@@ -269,7 +347,7 @@ class DuoHub:
         return 0
 
     def clear_outbox(self, ai_name):
-        outbox = OUTBOX_CLAUDE if ai_name == "claude" else OUTBOX_LOBSTER
+        outbox = self.outbox_for(ai_name)
         outbox.parent.mkdir(parents=True, exist_ok=True)
         with open(outbox, "w", encoding="utf-8") as f:
             f.write("")
@@ -286,9 +364,9 @@ class DuoHub:
             if mode == "negotiate":
                 hub_prompt = (
                     "[Duo Hub 协商模式]\n"
-                    "你正在和 OpenClaw「龙虾」协商分工。下面是你和对方的上一轮回复。\n"
-                    "请阅读后提出一个明确的分工方案。\n"
-                    "格式：\n- Claude负责：[具体任务]\n- 龙虾负责：[具体任务]\n"
+                    "你正在和 OpenClaw「龙虾」、Codex 协商三方分工。下面是上一轮回复。\n"
+                    "请阅读后确认或提出一个明确的三方分工方案。\n"
+                    "格式：\n- Claude负责：[具体任务]\n- 龙虾负责：[具体任务]\n- Codex负责：[具体任务]\n"
                     "规则：责任明确不重叠。回复使用中文。\n"
                 )
                 short_prompt = f"协商上下文：\n\n{task_text}"
@@ -302,7 +380,7 @@ class DuoHub:
             else:
                 hub_prompt = (
                     "[Duo Hub 协作模式]\n"
-                    "你在双AI协作中心工作，搭档是OpenClaw「龙虾」。\n"
+                    "你在三AI协作中心工作，搭档是 OpenClaw「龙虾」和 Codex。\n"
                     "分析任务需求并给出方案。回复使用中文。\n"
                 )
                 recent = self.get_recent_messages(10)
@@ -458,6 +536,107 @@ class DuoHub:
             self.session["lobster_status"] = "error"
             self._save_session()
 
+    def invoke_codex(self, task_text, model=None, mode="task"):
+        """在后台线程中调用本机 Codex CLI。"""
+        try:
+            self.session["codex_status"] = "working"
+            self.session["_codex_started"] = time.time()
+            self._save_session()
+            self.clear_outbox("codex")
+
+            if mode == "negotiate":
+                hub_prompt = (
+                    "[Duo Hub 协商模式]\n"
+                    "你是三方协作里的 Codex，同时也是临时协调员。请综合 Claude Code 和龙虾的意见，"
+                    "提出责任清晰、不重叠、可执行的三方分工。\n"
+                    "格式：\n- Claude负责：[具体任务]\n- 龙虾负责：[具体任务]\n- Codex负责：[具体任务]\n"
+                    "如果对方已有合理反馈，优先吸收。回复使用中文。\n"
+                )
+            elif mode == "execute":
+                hub_prompt = (
+                    "[Duo Hub 执行模式]\n"
+                    "分工已确认。只执行 Codex 负责的部分；需要改文件或运行命令就直接做。"
+                    "不要泄露密钥、token、cookie 或 secrets 文件内容。完成后报告。回复使用中文。\n"
+                )
+            else:
+                hub_prompt = (
+                    "[Duo Hub 协作模式]\n"
+                    "你在三AI协作中心工作，搭档是 Claude Code 和 OpenClaw「龙虾」。"
+                    "分析任务需求，说明你适合承担的部分和需要对方配合的部分。回复使用中文。\n"
+                )
+
+            prompt = (
+                f"{hub_prompt}\n\n"
+                f"当前 Codex 工作区：{CODEX_WORKSPACE}\n\n"
+                "---\n\n"
+                f"{task_text}"
+            )
+
+            CODEX_WORKSPACE.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as tmp:
+                last_message_path = Path(tmp.name)
+
+            cmd = _codex_cmd_parts()
+            cmd.extend(["--search", "-s", "danger-full-access", "-a", "never"])
+            model_arg = model if model is not None else self.session.get("codex_model", "")
+            if model_arg:
+                cmd.extend(["-m", model_arg])
+            cmd.extend([
+                "exec",
+                "-C",
+                str(CODEX_WORKSPACE),
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "--output-last-message",
+                str(last_message_path),
+                "-",
+            ])
+
+            result = subprocess.run(
+                cmd,
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=AI_TIMEOUT,
+                cwd=str(CODEX_WORKSPACE),
+                encoding="utf-8",
+                errors="replace",
+                env=_ENV,
+            )
+
+            output = ""
+            if last_message_path.exists():
+                output = last_message_path.read_text(encoding="utf-8", errors="replace").strip()
+            if not output:
+                output = (result.stdout or "").strip()
+            if not output and result.stderr:
+                output = f"[Codex 输出为空]\nstderr: {result.stderr[:800]}"
+            if result.returncode != 0:
+                output = f"Codex 退出码 {result.returncode}\n\n{output}\n\nstderr:\n{(result.stderr or '')[:1200]}".strip()
+
+            try:
+                last_message_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            with open(OUTBOX_CODEX, "w", encoding="utf-8") as f:
+                f.write(output)
+
+            self.session["codex_status"] = "done" if result.returncode == 0 else "error"
+            self._save_session()
+
+        except subprocess.TimeoutExpired:
+            with open(OUTBOX_CODEX, "w", encoding="utf-8") as f:
+                f.write(f"Codex 响应超时（超过 {AI_TIMEOUT} 秒）")
+            self.session["codex_status"] = "timeout"
+            self._save_session()
+        except Exception as e:
+            with open(OUTBOX_CODEX, "w", encoding="utf-8") as f:
+                f.write(f"Codex 调用出错: {str(e)}")
+            self.session["codex_status"] = "error"
+            self._save_session()
+
     @staticmethod
     def _extract_json(text):
         """从混合文本中提取第一个完整 JSON 对象"""
@@ -474,245 +653,207 @@ class DuoHub:
                     return text[start:i + 1]
         return None
 
+    def is_done(self, ai):
+        return self.session.get(f"{ai}_status") in TERMINAL_STATUSES
+
+    def _all_done(self, agents=AI_ORDER):
+        return all(self.is_done(ai) for ai in agents)
+
+    def _collect_if_done(self, ai):
+        if not self.is_done(ai):
+            return
+        if self.session.get(f"_{ai}_collected") == self.session["round"]:
+            return
+        text = self.read_outbox(ai)
+        if text:
+            self.add_message(ai, text)
+            self.session[f"_{ai}_collected"] = self.session["round"]
+            self._save_session()
+
+    def _format_recent(self, n=20):
+        recent = self.get_recent_messages(n)
+        return "\n\n".join([f"[{AI_LABELS.get(m['role'], m['role'])}]: {m['content']}" for m in recent])
+
+    def _start_agent(self, ai, task_text, mode="task"):
+        model = self.session.get(f"{ai}_model", "")
+        target = {
+            "claude": self.invoke_claude,
+            "lobster": self.invoke_lobster,
+            "codex": self.invoke_codex,
+        }[ai]
+        threading.Thread(target=target, args=(task_text, model, mode), daemon=True).start()
+
     def process_task(self, task_text, needs_division=False):
-        """提交任务：同时启动两个 AI"""
-        if self.session["phase"] in ("ai_working", "negotiating"):
+        """提交任务：同时启动三个 AI。"""
+        if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "executing"):
             return False, "已有任务正在处理中"
 
         self.session["round"] += 1
         self.session["phase"] = "ai_working"
         self.session["active_task_id"] = f"task_{self.session['round']:03d}"
         self.session["_needs_division"] = needs_division
+        for ai in AI_ORDER:
+            self.session[f"{ai}_status"] = "working"
+            self.session[f"_{ai}_collected"] = 0
         self._save_session()
 
-        # 写 inbox
         self.write_inbox(task_text)
-
-        # 添加用户消息
         self.add_message("user", task_text)
 
-        # 后台线程同时启动两个 AI（传当前模型设置）
-        cm = self.session.get("claude_model", "deepseek-v4-pro")
-        lm = self.session.get("lobster_model", "deepseek/deepseek-v4-pro")
-        t1 = threading.Thread(target=self.invoke_claude, args=(task_text, cm), daemon=True)
-        t2 = threading.Thread(target=self.invoke_lobster, args=(task_text, lm), daemon=True)
-        t1.start()
-        t2.start()
+        for ai in AI_ORDER:
+            self._start_agent(ai, task_text, "task")
 
         return True, self.session["active_task_id"]
 
     def check_and_collect_results(self):
-        """检查两个 AI 是否完成，收集结果，自动推进阶段"""
+        """检查三个 AI 是否完成，收集结果，自动推进阶段。"""
         phase = self.session["phase"]
 
-        # 超时检测：AI 卡在 working 状态超过 120 秒 → 强制标记为 timeout
         now = time.time()
-        for ai in ("claude", "lobster"):
+        for ai in AI_ORDER:
             if self.session.get(f"{ai}_status") == "working":
                 started = self.session.get(f"_{ai}_started", 0)
                 if started and now - started > AI_TIMEOUT + 10:
                     self.session[f"{ai}_status"] = "timeout"
-                    outbox = OUTBOX_CLAUDE if ai == "claude" else OUTBOX_LOBSTER
-                    with open(outbox, "w", encoding="utf-8") as f:
-                        f.write(f"{ai} 处理超时（超过120秒无响应）")
+                    with open(self.outbox_for(ai), "w", encoding="utf-8") as f:
+                        f.write(f"{AI_LABELS[ai]} 处理超时（超过 {AI_TIMEOUT} 秒无响应）")
                     self._save_session()
 
         if phase == "ai_working":
-            claude_done = self.session["claude_status"] in ("done", "timeout", "error")
-            lobster_done = self.session["lobster_status"] in ("done", "timeout", "error")
+            for ai in AI_ORDER:
+                self._collect_if_done(ai)
 
-            if claude_done and self.session.get("_claude_collected") != self.session["round"]:
-                text = self.read_outbox("claude")
-                if text:
-                    self.add_message("claude", text)
-                    self.session["_claude_collected"] = self.session["round"]
-                    self._save_session()
-
-            if lobster_done and self.session.get("_lobster_collected") != self.session["round"]:
-                text = self.read_outbox("lobster")
-                if text:
-                    self.add_message("lobster", text)
-                    self.session["_lobster_collected"] = self.session["round"]
-                    self._save_session()
-
-            if claude_done and lobster_done:
-                # 用户勾选了"需要分工"→ 自动进入协商
+            if self._all_done():
                 if self.session.get("_needs_division"):
                     self._auto_negotiate()
                 else:
                     self.session["phase"] = "awaiting_user"
-                self._save_session()
+                    self._save_session()
 
         elif phase == "negotiating":
             stage = self.session.get("_negotiate_stage", "")
-            claude_done = self.session["claude_status"] in ("done", "timeout", "error")
-            lobster_done = self.session["lobster_status"] in ("done", "timeout", "error")
 
-            if stage == "claude_proposes":
-                # Claude 提议阶段：只等 Claude
-                if claude_done and self.session.get("_claude_collected") != self.session["round"]:
-                    text = self.read_outbox("claude")
-                    if text:
-                        self.add_message("claude", text)
-                        self.session["_claude_collected"] = self.session["round"]
-                        self._save_session()
-                    # Claude 说完了 → 龙虾来回应
-                    self._negotiate_lobster_respond()
+            if stage in ("codex_proposes", "codex_adjusts"):
+                self._collect_if_done("codex")
+                if self.is_done("codex") and self.session.get("_codex_collected") == self.session["round"]:
+                    self._negotiate_peers_respond()
 
-            elif stage == "claude_adjusts":
-                # Claude 调整轮：等 Claude 调整完 → 再给龙虾看
-                if claude_done and self.session.get("_claude_collected") != self.session["round"]:
-                    text = self.read_outbox("claude")
-                    if text:
-                        self.add_message("claude", text)
-                        self.session["_claude_collected"] = self.session["round"]
-                        self._save_session()
-                    self._negotiate_lobster_respond()
+            elif stage == "peers_confirm":
+                for ai in ("claude", "lobster"):
+                    self._collect_if_done(ai)
 
-            elif stage == "lobster_confirms":
-                if lobster_done and self.session.get("_lobster_collected") != self.session["round"]:
-                    text = self.read_outbox("lobster")
-                    if text:
-                        self.add_message("lobster", text)
-                        self.session["_lobster_collected"] = self.session["round"]
-                        self._save_session()
-
-                    # 检查龙虾是否同意了
-                    agree_keywords = ["同意", "确认", "没问题", "可以", "OK", "ok", "好的", "就这样"]
-                    lobster_agreed = any(kw in text for kw in agree_keywords) if text else False
+                if self._all_done(("claude", "lobster")):
+                    peer_texts = [self.read_outbox("claude") or "", self.read_outbox("lobster") or ""]
+                    peers_agreed = all(self._agent_agreed(text) for text in peer_texts)
                     neg_rounds = self.session.get("_neg_rounds", 0) + 1
                     self.session["_neg_rounds"] = neg_rounds
 
-                    if lobster_agreed or neg_rounds >= 3:
-                        # 达成一致或达到最大轮次 → 等待确认
+                    if peers_agreed or neg_rounds >= 3:
                         self.session["phase"] = "pending_confirmation"
-                        msg = "✅ 协商完成！请确认分工。" if lobster_agreed else "⚠️ 已达最大协商轮次，请确认当前方案。"
+                        msg = "✅ 三方协商完成！请确认分工。" if peers_agreed else "⚠️ 已达最大协商轮次，请确认当前方案。"
                         self.add_message("system", msg)
                         self._save_session()
                     else:
-                        # 龙虾有不同意见 → Claude 再调整
-                        self._negotiate_claude_adjust()
+                        self._negotiate_codex_adjust()
 
         elif phase == "executing":
-            claude_done = self.session["claude_status"] in ("done", "timeout", "error")
-            lobster_done = self.session["lobster_status"] in ("done", "timeout", "error")
+            for ai in AI_ORDER:
+                self._collect_if_done(ai)
 
-            if claude_done and self.session.get("_claude_collected") != self.session["round"]:
-                text = self.read_outbox("claude")
-                if text:
-                    self.add_message("claude", text)
-                    self.session["_claude_collected"] = self.session["round"]
-                    self._save_session()
-
-            if lobster_done and self.session.get("_lobster_collected") != self.session["round"]:
-                text = self.read_outbox("lobster")
-                if text:
-                    self.add_message("lobster", text)
-                    self.session["_lobster_collected"] = self.session["round"]
-                    self._save_session()
-
-            if claude_done and lobster_done:
+            if self._all_done():
                 self.session["phase"] = "done"
-                self.add_message("system", "🎉 双方执行完毕！请在面板中查看各自成果。")
+                self.add_message("system", "🎉 三方执行完毕！请在面板中查看各自成果。")
                 self._save_session()
 
     def _auto_negotiate(self):
-        """顺序协商：Claude 先提议分工 → 龙虾看了再确认"""
-        recent = self.get_recent_messages(10)
-        ctx_parts = []
-        for m in recent:
-            role_map = {"user": "天火大人", "claude": "Claude", "lobster": "龙虾"}
-            ctx_parts.append(f"[{role_map.get(m['role'], m['role'])}]: {m['content']}")
-        context_str = "\n\n".join(ctx_parts)
+        """Codex 先汇总三方初步意见并提出三方分工。"""
+        context_str = self._format_recent(20)
 
-        # 第一阶段：Claude 看龙虾回复后提议分工
         self.session["round"] += 1
         self.session["phase"] = "negotiating"
-        self.session["claude_status"] = "working"
-        self.session["lobster_status"] = "idle"
-        self.session["_claude_collected"] = 0
         self.session["_negotiate_round"] = self.session["round"]
-        self.session["_negotiate_stage"] = "claude_proposes"
+        self.session["_negotiate_stage"] = "codex_proposes"
+        self.session["_neg_rounds"] = 0
+        for ai in AI_ORDER:
+            self.session[f"{ai}_status"] = "idle"
+            self.session[f"_{ai}_collected"] = 0
+        self.session["codex_status"] = "working"
         self._save_session()
 
-        self.add_message("system", "🤝 Claude 正在阅读龙虾的方案，准备提议分工…")
+        self.add_message("system", "🤝 Codex 正在汇总三方意见，准备提出三方分工…")
 
-        cm = self.session.get("claude_model", "deepseek-v4-pro")
-        claude_prompt = (
-            "## 协商分工 - 你来提议\n\n"
-            "请阅读龙虾的方案，提出一个明确的分工。格式：\n"
-            "- Claude负责：[你要做的具体任务]\n"
-            "- 龙虾负责：[龙虾要做的具体任务]\n"
-            "规则：责任明确不重叠。回复使用中文。\n\n"
-            f"---\n{context_str}"
-        )
-        self.write_inbox(claude_prompt)
-        t1 = threading.Thread(target=self.invoke_claude, args=(claude_prompt, cm, "negotiate"), daemon=True)
-        t1.start()
-
-    def _negotiate_lobster_respond(self):
-        """第二阶段：龙虾看 Claude 提议后确认/调整"""
-        recent = self.get_recent_messages(15)
-        ctx_parts = []
-        for m in recent:
-            role_map = {"user": "天火大人", "claude": "Claude", "lobster": "龙虾", "system": "系统"}
-            ctx_parts.append(f"[{role_map.get(m['role'], m['role'])}]: {m['content']}")
-        context_str = "\n\n".join(ctx_parts)
-
-        self.session["lobster_status"] = "working"
-        self.session["_lobster_collected"] = 0
-        self.session["_negotiate_stage"] = "lobster_confirms"
-        self._save_session()
-
-        self.add_message("system", "🤝 龙虾正在阅读 Claude 的分工提议…")
-
-        lm = self.session.get("lobster_model", "deepseek/deepseek-v4-flash")
-        lobster_prompt = (
-            "## 协商分工 - 你来确认\n\n"
-            "Claude 已经提出了分工方案（见上文）。请确认或调整：\n"
-            "- 同意就说「同意分工」并列出你要执行的任务\n"
-            "- 不同意的部分请说明怎么调整\n"
+        prompt = (
+            "## 协商分工 - Codex 汇总提案\n\n"
+            "请阅读 Claude、龙虾和 Codex 的初步回复，提出一个明确的三方分工。\n"
+            "必须包含：\n"
+            "- Claude负责：[具体、可执行]\n"
+            "- 龙虾负责：[具体、可执行]\n"
+            "- Codex负责：[具体、可执行]\n"
+            "规则：责任边界清晰，不重复安排同一件事；如果某方能力明显不适合，就把它安排到更适合的支持/审查/资料任务。\n"
             "回复使用中文。\n\n"
             f"---\n{context_str}"
         )
-        self.write_inbox(lobster_prompt)
-        t2 = threading.Thread(target=self.invoke_lobster, args=(lobster_prompt, lm, "negotiate"), daemon=True)
-        t2.start()
+        self.write_inbox(prompt)
+        self._start_agent("codex", prompt, "negotiate")
 
-    def _negotiate_claude_adjust(self):
-        """后续协商轮：Claude 看了龙虾的反馈后调整方案"""
-        recent = self.get_recent_messages(15)
-        ctx_parts = []
-        for m in recent:
-            role_map = {"user": "天火大人", "claude": "Claude", "lobster": "龙虾", "system": "系统"}
-            ctx_parts.append(f"[{role_map.get(m['role'], m['role'])}]: {m['content']}")
-        context_str = "\n\n".join(ctx_parts)
+    def _negotiate_peers_respond(self):
+        """Claude 和龙虾并行确认 Codex 的三方分工提案。"""
+        context_str = self._format_recent(20)
+        self.session["_negotiate_stage"] = "peers_confirm"
+        for ai in ("claude", "lobster"):
+            self.session[f"{ai}_status"] = "working"
+            self.session[f"_{ai}_collected"] = 0
+        self._save_session()
+
+        self.add_message("system", "🤝 Claude 和龙虾正在确认 Codex 的三方分工提案…")
+
+        prompt = (
+            "## 协商分工 - 确认或调整\n\n"
+            "Codex 已经提出三方分工方案（见上文）。请只从你的能力边界和执行可行性出发确认或调整：\n"
+            "- 同意就说「同意分工」，并列出你要执行的任务\n"
+            "- 不同意就说明哪一项不可行，并给出替代分工\n"
+            "回复使用中文。\n\n"
+            f"---\n{context_str}"
+        )
+        self.write_inbox(prompt)
+        self._start_agent("claude", prompt, "negotiate")
+        self._start_agent("lobster", prompt, "negotiate")
+
+    def _negotiate_codex_adjust(self):
+        """Claude 或龙虾不同意时，Codex 再整合调整。"""
+        context_str = self._format_recent(25)
 
         self.session["round"] += 1
-        self.session["claude_status"] = "working"
-        self.session["lobster_status"] = "idle"
-        self.session["_claude_collected"] = 0
-        self.session["_claude_started"] = time.time()
-        self.session["_negotiate_stage"] = "claude_adjusts"
+        self.session["_negotiate_round"] = self.session["round"]
+        self.session["_negotiate_stage"] = "codex_adjusts"
+        for ai in AI_ORDER:
+            self.session[f"{ai}_status"] = "idle"
+            self.session[f"_{ai}_collected"] = 0
+        self.session["codex_status"] = "working"
         self._save_session()
 
-        self.add_message("system", "🤝 龙虾有不同意见，Claude 正在调整方案…")
+        self.add_message("system", "🤝 Claude 或龙虾提出调整意见，Codex 正在重新整合分工…")
 
-        cm = self.session.get("claude_model", "deepseek-v4-pro")
-        claude_prompt = (
-            "## 协商 - 调整方案\n\n"
-            "龙虾看了你的方案后有反馈（见上文）。请根据龙虾的意见调整分工方案，"
-            "努力达成一致。如果龙虾的反馈合理就接受。\n"
-            "格式：\n- Claude负责：[调整后的任务]\n- 龙虾负责：[调整后的任务]\n"
-            "回复使用中文。\n\n"
+        prompt = (
+            "## 协商 - Codex 调整方案\n\n"
+            "Claude 或龙虾对上轮三方分工提出了不同意见。请吸收合理反馈，重新给出三方分工。\n"
+            "格式：\n- Claude负责：[调整后的任务]\n- 龙虾负责：[调整后的任务]\n- Codex负责：[调整后的任务]\n"
+            "目标是可执行，不追求平均分配。回复使用中文。\n\n"
             f"---\n{context_str}"
         )
-        self.write_inbox(claude_prompt)
-        t = threading.Thread(target=self.invoke_claude, args=(claude_prompt, cm, "negotiate"), daemon=True)
-        t.start()
+        self.write_inbox(prompt)
+        self._start_agent("codex", prompt, "negotiate")
+
+    @staticmethod
+    def _agent_agreed(text):
+        if not text:
+            return False
+        positive = ["同意分工", "同意", "确认", "没问题", "可以", "OK", "ok", "好的", "就这样"]
+        negative = ["不同意", "不行", "不能", "做不到", "不可行", "需要调整", "必须调整", "建议调整"]
+        return any(kw in text for kw in positive) and not any(kw in text for kw in negative)
 
     def negotiate(self):
-        """手动触发重新协商"""
+        """手动触发重新协商。"""
         if self.session["phase"] not in ("awaiting_user", "pending_confirmation", "done"):
             return False, "当前阶段不能发起协商"
 
@@ -720,55 +861,47 @@ class DuoHub:
         return True, "ok"
 
     def confirm_plan(self):
-        """用户确认分工方案 → 提取各自任务，分别触发执行"""
+        """用户确认分工方案 → 三方分别执行。"""
         if self.session["phase"] != "pending_confirmation":
             return False, "没有待确认的分工方案"
 
+        self.session["round"] += 1
         self.session["phase"] = "executing"
         self.session["_exec_round"] = self.session["round"]
-        self.add_message("system", "✅ 天火大人已确认分工！双方开始执行各自任务…")
+        for ai in AI_ORDER:
+            self.session[f"{ai}_status"] = "working"
+            self.session[f"_{ai}_collected"] = 0
+        self.add_message("system", "✅ 天火大人已确认分工！三方开始执行各自任务…")
         self._save_session()
 
-        # 提取协商轮双方的完整回复
-        recent = self.get_recent_messages(20)
-        all_context = "\n\n".join([f"[{m['role']}]: {m['content']}" for m in recent])
-
-        # 给 Claude 的执行指令：包含完整上下文 + 强调执行 Claude 的部分
-        claude_task = (
-            "## 执行阶段 - Claude\n\n"
-            "分工方案已经天火大人确认。**你负责的部分已经在下方对话中明确标注（Claude负责：xxx）**。\n"
-            "不要问问题、不要提议——立即用 Write/Bash/Edit 等工具动手执行你的任务。\n"
-            "完成后报告你具体做了什么。\n\n"
+        all_context = self._format_recent(30)
+        shared_task = (
+            "## 执行阶段 - 三方共享上下文\n\n"
+            "分工方案已经天火大人确认。每个 AI 只执行明确标注给自己的部分：\n"
+            "- Claude 只执行「Claude负责」部分\n"
+            "- 龙虾只执行「龙虾负责」部分\n"
+            "- Codex 只执行「Codex负责」部分\n"
+            "不要重复执行别人的任务。完成后报告你具体做了什么。\n\n"
             f"---\n{all_context}"
         )
+        self.write_inbox(shared_task)
 
-        # 写 inbox 给龙虾读
-        lobster_task = (
-            "## 执行阶段 - 龙虾\n\n"
-            "分工已确认。**你负责的部分在对话中标注了（龙虾负责：xxx）**。"
-            "立即执行，不要提问。完成后报告。\n\n"
-            f"---\n{all_context}"
-        )
-        self.write_inbox(lobster_task)
-
-        # 启动执行
-        cm = self.session.get("claude_model", "deepseek-v4-pro")
-        lm = self.session.get("lobster_model", "deepseek/deepseek-v4-flash")
-        t1 = threading.Thread(target=self.invoke_claude, args=(claude_task, cm, "execute"), daemon=True)
-        t2 = threading.Thread(target=self.invoke_lobster, args=(lobster_task, lm, "execute"), daemon=True)
-        t1.start()
-        t2.start()
+        for ai in AI_ORDER:
+            agent_task = (
+                f"## 执行阶段 - {AI_LABELS[ai]}\n\n"
+                f"分工已确认。你是 {AI_LABELS[ai]}，只执行对话中标注给你的部分。"
+                "直接动手执行，完成后报告。不要泄露密钥或私人凭据。\n\n"
+                f"---\n{all_context}"
+            )
+            self._start_agent(ai, agent_task, "execute")
 
         return True, "ok"
 
     def set_model(self, ai, model):
-        """切换 AI 模型"""
-        if ai == "claude":
-            self.session["claude_model"] = model
-        elif ai == "lobster":
-            self.session["lobster_model"] = model
-        else:
+        """切换 AI 模型。"""
+        if ai not in AI_ORDER:
             return False
+        self.session[f"{ai}_model"] = model or ""
         self._save_session()
         return True
 
@@ -803,22 +936,25 @@ class DuoHub:
 
         # 提取协商结果（如果有）
         division = None
-        if self.session["phase"] in ("pending_confirmation", "confirmed"):
-            for m in reversed(messages):
-                if m.get("round") == self.session.get("_negotiate_round") and m["role"] in ("claude", "lobster"):
-                    division = {
-                        "claude": m["content"] if m["role"] == "claude" else "",
-                        "lobster": m["content"] if m["role"] == "lobster" else "",
-                    }
-                    # 找配对的另一个
-                    for m2 in reversed(messages):
-                        if m2.get("round") == m["round"] and m2["role"] != m["role"] and m2["role"] in ("claude", "lobster"):
-                            if m["role"] == "claude":
-                                division["lobster"] = m2["content"]
-                            else:
-                                division["claude"] = m2["content"]
-                            break
-                    break
+        if self.session["phase"] in ("pending_confirmation", "executing", "done"):
+            neg_round = self.session.get("_negotiate_round")
+            if neg_round:
+                division = {ai: "" for ai in AI_ORDER}
+                for m in messages:
+                    if m.get("round") == neg_round and m.get("role") in AI_ORDER:
+                        division[m["role"]] = m.get("content", "")
+                if not any(division.values()):
+                    division = None
+
+        agents = [
+            {
+                "id": ai,
+                "label": AI_LABELS[ai],
+                "status": self.session.get(f"{ai}_status", "idle"),
+                "model": self.session.get(f"{ai}_model", ""),
+            }
+            for ai in AI_ORDER
+        ]
 
         return {
             "session_id": self.session["session_id"],
@@ -826,10 +962,13 @@ class DuoHub:
             "round": self.session["round"],
             "claude_status": self.session["claude_status"],
             "lobster_status": self.session["lobster_status"],
+            "codex_status": self.session.get("codex_status", "idle"),
             "claude_model": self.session.get("claude_model", "deepseek-v4-pro"),
             "lobster_model": self.session.get("lobster_model", "deepseek/deepseek-v4-pro"),
+            "codex_model": self.session.get("codex_model", ""),
             "active_task_id": self.session.get("active_task_id"),
             "gateways": self.check_gateways(),
+            "agents": agents,
             "messages": recent,
             "total_messages": len(messages),
             "division": division,
@@ -925,7 +1064,7 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
 
             ai = data.get("ai", "")
             model = data.get("model", "")
-            if ai not in ("claude", "lobster") or not model:
+            if ai not in AI_ORDER or model is None:
                 self._serve_json({"error": "需要 ai 和 model 参数"}, 400)
                 return
 
@@ -1001,11 +1140,13 @@ def main():
             pass
 
     print("=" * 56)
-    print("  ⚡ Duo Hub — 天火大人的双AI协作中心")
+    print("  ⚡ Duo Hub — 天火大人的三AI协作中心")
     print("=" * 56)
     print()
     print(f"  协议目录: {PROTOCOL_DIR}")
     print(f"  前端文件: {WEB_DIR}")
+    print(f"  Claude 工作区: {CLAUDE_WORKSPACE}")
+    print(f"  Codex 工作区: {CODEX_WORKSPACE}")
     print()
 
     # 检查网关
@@ -1013,11 +1154,13 @@ def main():
     gws = hub.check_gateways()
     ccmr_icon = "[OK]" if gws["ccmr"] else "[XX]"
     oc_icon = "[OK]" if gws["openclaw"] else "[XX]"
+    codex_icon = "[OK]" if gws["codex"] else "[XX]"
     print(f"  {ccmr_icon} ccmr 网关 (端口 {CCMR_PORT})")
     print(f"  {oc_icon} OpenClaw 网关 (端口 {OPENCLAW_PORT})")
+    print(f"  {codex_icon} Codex CLI ({CODEX_CMD})")
     print()
 
-    if not gws["ccmr"] or not gws["openclaw"]:
+    if not gws["ccmr"] or not gws["openclaw"] or not gws["codex"]:
         print("[!!] 部分网关未运行，请先启动相应网关")
         print("     或者使用 launch_duo_hub.cmd 一键启动全部服务")
         print()

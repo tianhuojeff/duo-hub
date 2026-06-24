@@ -1,10 +1,10 @@
 @echo off
 chcp 65001 >nul
-title Duo Hub - 双AI协作中心
+title Duo Hub - 三AI协作中心
 color 0E
 
 echo ============================================================
-echo   Duo Hub - 双AI协作中心
+echo   Duo Hub - 三AI协作中心
 echo ============================================================
 echo.
 
@@ -32,6 +32,21 @@ if errorlevel 1 (
     timeout /t 8 /nobreak >nul
 ) else (
     echo   already running
+)
+
+:: ============================================================
+:: Codex CLI check (no gateway required)
+:: ============================================================
+where codex.cmd >nul 2>nul
+if errorlevel 1 (
+    where codex >nul 2>nul
+    if errorlevel 1 (
+        echo [!] Codex CLI not found in PATH
+    ) else (
+        echo [OK] Codex CLI found
+    )
+) else (
+    echo [OK] Codex CLI found
 )
 
 :: ============================================================

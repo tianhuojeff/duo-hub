@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Duo Hub — 双AI协作中心</title>
+<title>Duo Hub — 三AI协作中心</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -11,11 +11,12 @@
 <header class="topbar">
   <div class="topbar-left">
     <span class="logo">⚡ Duo Hub</span>
-    <span class="subtitle">双AI协作中心</span>
+    <span class="subtitle">三AI协作中心</span>
   </div>
   <div class="topbar-right">
     <span id="gw-ccmr" class="gw-indicator" title="ccmr 网关">🔵 ccmr</span>
     <span id="gw-lobster" class="gw-indicator" title="OpenClaw 网关">🦞 龙虾</span>
+    <span id="gw-codex" class="gw-indicator" title="Codex CLI">🟢 Codex</span>
     <span class="session-badge" id="session-id">会话 #---</span>
   </div>
 </header>
@@ -68,13 +69,33 @@
     </div>
   </section>
 
+  <!-- Codex 面板 -->
+  <section class="ai-panel codex-panel" id="codex-panel">
+    <div class="panel-header">
+      <span class="ai-icon">🟢</span>
+      <span class="ai-name">Codex</span>
+      <select class="model-select codex-select" id="codex-model" title="切换模型">
+        <option value="">默认</option>
+        <option value="gpt-5.5">GPT-5.5</option>
+        <option value="gpt-5.4">GPT-5.4</option>
+      </select>
+      <span class="ai-status" id="codex-status-badge" data-status="idle">空闲</span>
+    </div>
+    <div class="panel-body" id="codex-output">
+      <div class="placeholder">等待任务提交…</div>
+    </div>
+    <div class="panel-footer">
+      <span class="elapsed" id="codex-elapsed"></span>
+    </div>
+  </section>
+
 </div>
 
 <!-- 对话历史 -->
 <section class="chat-section">
   <div class="section-label">📜 对话记录</div>
   <div class="chat-messages" id="chat-messages">
-    <div class="chat-empty">输入你的需求，两个 AI 将同时响应…</div>
+    <div class="chat-empty">输入你的需求，三个 AI 将同时响应…</div>
   </div>
 </section>
 
@@ -101,7 +122,7 @@
       rows="2"
     ></textarea>
     <div class="btn-group">
-      <label class="checkbox-label" title="勾选后两个AI会自动协商分工">
+      <label class="checkbox-label" title="勾选后三个AI会自动协商分工">
         <input type="checkbox" id="chk-division"> 🤝 需要分工
       </label>
       <button class="btn btn-primary" id="btn-send" title="发送任务 (Ctrl+Enter)">

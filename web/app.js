@@ -1,5 +1,5 @@
 /**
- * Duo Hub — 双AI协作中心 前端逻辑
+ * Duo Hub — 三AI协作中心 前端逻辑
  */
 
 const POLL_INTERVAL = 500;
@@ -8,12 +8,16 @@ const $ = (sel) => document.querySelector(sel);
 
 const elClaudeOutput = $("#claude-output");
 const elLobsterOutput = $("#lobster-output");
+const elCodexOutput = $("#codex-output");
 const elClaudeStatus = $("#claude-status-badge");
 const elLobsterStatus = $("#lobster-status-badge");
+const elCodexStatus = $("#codex-status-badge");
 const elClaudeModel = $("#claude-model");
 const elLobsterModel = $("#lobster-model");
+const elCodexModel = $("#codex-model");
 const elClaudeElapsed = $("#claude-elapsed");
 const elLobsterElapsed = $("#lobster-elapsed");
+const elCodexElapsed = $("#codex-elapsed");
 const elChatMessages = $("#chat-messages");
 const elTaskInput = $("#task-input");
 const elBtnSend = $("#btn-send");
@@ -25,16 +29,19 @@ const elPhaseText = $("#phase-text");
 const elSessionId = $("#session-id");
 const elGwCcmr = $("#gw-ccmr");
 const elGwLobster = $("#gw-lobster");
+const elGwCodex = $("#gw-codex");
 
 let state = {
   phase: "idle",
   claude_status: "idle",
   lobster_status: "idle",
+  codex_status: "idle",
   messages: [],
-  gateways: { ccmr: false, openclaw: false },
+  gateways: { ccmr: false, openclaw: false, codex: false },
 };
 let lastClaudeMsgIdx = -1;
 let lastLobsterMsgIdx = -1;
+let lastCodexMsgIdx = -1;
 let lastMsgCount = 0;
 let taskStartTime = null;
 let elapsedTimer = null;
@@ -49,8 +56,9 @@ const PHASE_LABELS = {
   ai_working: "⚡ AI 分析中…",
   negotiating: "🤝 自动协商中…",
   pending_confirmation: "📋 等待确认分工",
-  executing: "🔨 双方执行中…",
+  executing: "🔨 三方执行中…",
   done: "🎉 全部完成！",
+  awaiting_user: "就绪 — 可继续输入需求",
 };
 
 // === API ===
@@ -127,6 +135,9 @@ function updateUI(data) {
   if (data.lobster_model !== undefined && elLobsterModel.value !== data.lobster_model) {
     elLobsterModel.value = data.lobster_model;
   }
+  if (data.codex_model !== undefined && elCodexModel.value !== data.codex_model) {
+    elCodexModel.value = data.codex_model;
+  }
 
   // 消息渲染
   if (data.messages && data.messages.length > lastMsgCount) {
@@ -145,6 +156,9 @@ function updateUI(data) {
     }
     if (data.division.lobster) {
       html += '<div class="division-item" style="margin-top:8px"><strong>🦞 龙虾 负责:</strong><br>' + renderMarkdown(data.division.lobster) + '</div>';
+    }
+    if (data.division.codex) {
+      html += '<div class="division-item" style="margin-top:8px"><strong>🟢 Codex 负责:</strong><br>' + renderMarkdown(data.division.codex) + '</div>';
     }
     bodyEl.innerHTML = html || '<em>协商中…</em>';
     divEl.style.display = "block";
@@ -166,16 +180,19 @@ function handlePhaseChange(newPhase, prevPhase) {
   if (newPhase === "ai_working" && prevPhase !== "negotiating") {
     elClaudeOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
     elLobsterOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
+    elCodexOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
   }
   if (newPhase === "negotiating") {
     elClaudeOutput.innerHTML = '<div class="placeholder">🤝 正在协商分工…</div>';
     elLobsterOutput.innerHTML = '<div class="placeholder">🤝 正在协商分工…</div>';
+    elCodexOutput.innerHTML = '<div class="placeholder">🤝 正在协商分工…</div>';
   }
   // 进入执行阶段 → 清空确认栏，显示执行中
   if (newPhase === "executing") {
     elConfirmBar.style.display = "none";
     elClaudeOutput.innerHTML = '<div class="placeholder">🔨 正在执行任务…</div>';
     elLobsterOutput.innerHTML = '<div class="placeholder">🔨 正在执行任务…</div>';
+    elCodexOutput.innerHTML = '<div class="placeholder">🔨 正在执行任务…</div>';
     taskStartTime = Date.now();
     startElapsedTimer();
   }
@@ -194,6 +211,8 @@ function updateGatewayIndicators(gws) {
   elGwCcmr.className = "gw-indicator " + (gws.ccmr ? "online" : "offline");
   elGwLobster.textContent = gws.openclaw ? "🦞 龙虾 ●" : "🦞 龙虾 ○";
   elGwLobster.className = "gw-indicator " + (gws.openclaw ? "online" : "offline");
+  elGwCodex.textContent = gws.codex ? "🟢 Codex ●" : "🟢 Codex ○";
+  elGwCodex.className = "gw-indicator " + (gws.codex ? "online" : "offline");
 }
 
 function updateStatusBadges(data) {
@@ -201,6 +220,8 @@ function updateStatusBadges(data) {
   elClaudeStatus.dataset.status = data.claude_status;
   elLobsterStatus.textContent = STATUS_LABELS[data.lobster_status] || data.lobster_status;
   elLobsterStatus.dataset.status = data.lobster_status;
+  elCodexStatus.textContent = STATUS_LABELS[data.codex_status] || data.codex_status;
+  elCodexStatus.dataset.status = data.codex_status;
 }
 
 function updateButtonStates() {
@@ -229,6 +250,7 @@ function startElapsedTimer() {
     const t = `⏱ ${m}:${String(s).padStart(2, "0")}`;
     elClaudeElapsed.textContent = t;
     elLobsterElapsed.textContent = t;
+    elCodexElapsed.textContent = t;
   }, 1000);
 }
 
@@ -237,15 +259,17 @@ function stopElapsedTimer() {
   taskStartTime = null;
   elClaudeElapsed.textContent = "";
   elLobsterElapsed.textContent = "";
+  elCodexElapsed.textContent = "";
 }
 
 function renderAIPanels(messages) {
-  let latestClaude = null, latestLobster = null;
+  let latestClaude = null, latestLobster = null, latestCodex = null;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (m.role === "claude" && !latestClaude) latestClaude = m;
     if (m.role === "lobster" && !latestLobster) latestLobster = m;
-    if (latestClaude && latestLobster) break;
+    if (m.role === "codex" && !latestCodex) latestCodex = m;
+    if (latestClaude && latestLobster && latestCodex) break;
   }
   if (latestClaude && latestClaude.id !== lastClaudeMsgIdx) {
     elClaudeOutput.innerHTML = renderMarkdown(latestClaude.content);
@@ -256,6 +280,11 @@ function renderAIPanels(messages) {
     elLobsterOutput.innerHTML = renderMarkdown(latestLobster.content);
     elLobsterOutput.scrollTop = 0;
     lastLobsterMsgIdx = latestLobster.id;
+  }
+  if (latestCodex && latestCodex.id !== lastCodexMsgIdx) {
+    elCodexOutput.innerHTML = renderMarkdown(latestCodex.content);
+    elCodexOutput.scrollTop = 0;
+    lastCodexMsgIdx = latestCodex.id;
   }
 }
 
@@ -270,7 +299,7 @@ function renderMessages(messages) {
     div.className = `chat-msg role-${m.role}`;
 
     const roleLabel = {
-      user: "👤 天火大人", claude: "🔵 Claude", lobster: "🦞 龙虾", system: "⚙ 系统",
+      user: "👤 天火大人", claude: "🔵 Claude", lobster: "🦞 龙虾", codex: "🟢 Codex", system: "⚙ 系统",
     }[m.role] || m.role;
 
     const time = m.timestamp ? m.timestamp.slice(11, 16) : "";
@@ -322,6 +351,7 @@ elBtnSend.addEventListener("click", async () => {
     startElapsedTimer();
     elClaudeOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
     elLobsterOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
+    elCodexOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
     fetchState();
   }
 });
@@ -338,6 +368,7 @@ elBtnRenegotiate.addEventListener("click", async () => {
     lastMsgCount = 0;
     elClaudeOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
     elLobsterOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
+    elCodexOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
     taskStartTime = Date.now();
     startElapsedTimer();
     fetchState();
@@ -353,8 +384,9 @@ elTaskInput.addEventListener("keydown", (e) => {
 // 模型切换
 elClaudeModel.addEventListener("change", () => setModel("claude", elClaudeModel.value));
 elLobsterModel.addEventListener("change", () => setModel("lobster", elLobsterModel.value));
+elCodexModel.addEventListener("change", () => setModel("codex", elCodexModel.value));
 
 // === 启动 ===
 fetchState();
 setInterval(fetchState, POLL_INTERVAL);
-console.log("⚡ Duo Hub 前端已就绪");
+console.log("⚡ Duo Hub 三方前端已就绪");
