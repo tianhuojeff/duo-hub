@@ -886,7 +886,7 @@ function initEnergyFieldCanvas() {
     { key: "division", label: "协商分工", type: "Protocol", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92 },
     { key: "investment", label: "投资学习", type: "Learning", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86 },
     { key: "strategy", label: "策略版本", type: "Backtest", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86 },
-    { key: "github", label: "GitHub v0.4.3", type: "Version", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78 },
+    { key: "github", label: "GitHub v0.4.4", type: "Version", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78 },
     { key: "log", label: "工作日志", type: "Log", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8 },
     { key: "telegram", label: "TG 桥", type: "Bridge", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76 },
   ];
@@ -1033,12 +1033,12 @@ function initEnergyFieldCanvas() {
   function updateCore(dt) {
     const idleX = width * 0.5;
     const idleY = height * 0.5;
-    core.tx = idleX + (pointer.x - idleX) * pointer.strength * 0.96;
-    core.ty = idleY + (pointer.y - idleY) * pointer.strength * 0.96;
-    core.vx += (core.tx - core.x) * 0.16 * dt;
-    core.vy += (core.ty - core.y) * 0.16 * dt;
-    core.vx *= 0.66;
-    core.vy *= 0.66;
+    core.tx = idleX;
+    core.ty = idleY;
+    core.vx += (core.tx - core.x) * 0.18 * dt;
+    core.vy += (core.ty - core.y) * 0.18 * dt;
+    core.vx *= 0.62;
+    core.vy *= 0.62;
     core.x += core.vx * dt;
     core.y += core.vy * dt;
 
@@ -1142,19 +1142,10 @@ function initEnergyFieldCanvas() {
     const z1 = y * sinX + z * cosX;
     const fov = core.radius * (expanded ? 7.2 : 4.6);
     const scale = fov / (fov + z1);
-    let sx = core.x + x * scale;
-    let sy = core.y + y1 * scale;
-
-    if (pointer.strength > 0.01) {
-      const follow = pointer.strength * (pointer.down ? 0.28 : 0.16) * (expanded ? 0.72 : 1);
-      sx += (pointer.x - sx) * follow;
-      sy += (pointer.y - sy) * follow;
-    }
-
     return {
       node,
-      x: sx,
-      y: sy,
+      x: core.x + x * scale,
+      y: core.y + y1 * scale,
       z: z1,
       scale,
       radius: (expanded ? 10.4 : 8.6) * node.weight * Math.max(0.78, scale),
@@ -1162,7 +1153,7 @@ function initEnergyFieldCanvas() {
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.4.3"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.4.4"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
