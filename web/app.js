@@ -876,6 +876,26 @@ function initEnergyFieldCanvas() {
   const pulses = [];
   const dragTrail = [];
   const pointers = new Map();
+  const semanticNodes = [
+    { key: "user", label: "天火需求", type: "需求", color: "#f8fafc", glow: "#a5f3fc", lane: 0, phase: 0.12, weight: 1.12 },
+    { key: "claude", label: "Claude", type: "代码执行", color: "#dbeafe", glow: "#3b82f6", lane: 1, phase: 0.92, weight: 1.05 },
+    { key: "lobster", label: "龙虾", type: "外部执行", color: "#ffedd5", glow: "#f59e0b", lane: 1, phase: 2.18, weight: 1.05 },
+    { key: "codex", label: "Codex", type: "协调验证", color: "#dcfce7", glow: "#22c55e", lane: 1, phase: 3.46, weight: 1.05 },
+    { key: "memory", label: "共享记忆", type: "Memory", color: "#f5f3ff", glow: "#a78bfa", lane: 2, phase: 4.12, weight: 0.94 },
+    { key: "tasks", label: "任务队列", type: "Tasks", color: "#e0f2fe", glow: "#38bdf8", lane: 2, phase: 5.12, weight: 0.9 },
+    { key: "division", label: "协商分工", type: "Protocol", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92 },
+    { key: "investment", label: "投资学习", type: "Learning", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86 },
+    { key: "strategy", label: "策略版本", type: "Backtest", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86 },
+    { key: "github", label: "GitHub v0.4.2", type: "Version", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78 },
+    { key: "log", label: "工作日志", type: "Log", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8 },
+    { key: "telegram", label: "TG 桥", type: "Bridge", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76 },
+  ];
+  const semanticLinks = [
+    ["user", "claude"], ["user", "lobster"], ["user", "codex"],
+    ["codex", "division"], ["division", "claude"], ["division", "lobster"],
+    ["memory", "tasks"], ["memory", "log"], ["investment", "strategy"],
+    ["codex", "github"], ["tasks", "telegram"], ["codex", "memory"],
+  ];
   const palette = [
     { core: "#ffffff", glow: "#7dd3fc" },
     { core: "#e0f2fe", glow: "#38bdf8" },
@@ -914,9 +934,14 @@ function initEnergyFieldCanvas() {
   let targetEnergy = 0.86;
   let densityScale = 0.78;
   let lastPinchDistance = null;
+  let hoveredSemantic = null;
+
+  function isExpandedMap() {
+    return !!(elStarMapWindow && elStarMapWindow.classList.contains("is-expanded"));
+  }
 
   function desiredParticleCount() {
-    const expanded = elStarMapWindow && elStarMapWindow.classList.contains("is-expanded");
+    const expanded = isExpandedMap();
     const baseCount = Math.max(96, Math.min(expanded ? 560 : 320, Math.floor((width * height) / 780)));
     return Math.max(56, Math.round(baseCount * densityScale));
   }
@@ -950,7 +975,7 @@ function initEnergyFieldCanvas() {
     const changed = Math.abs(nextWidth - width) > 1 || Math.abs(nextHeight - height) > 1;
     width = nextWidth;
     height = nextHeight;
-    core.radius = Math.max(44, Math.min(elStarMapWindow && elStarMapWindow.classList.contains("is-expanded") ? 180 : 96, Math.min(width, height) * 0.45));
+    core.radius = Math.max(44, Math.min(isExpandedMap() ? 180 : 96, Math.min(width, height) * 0.45));
 
     if (changed) {
       core.x = width * 0.5;
@@ -1007,6 +1032,9 @@ function initEnergyFieldCanvas() {
   function makeParticle() {
     const anchor = randomAnchor();
     const color = palette[Math.floor(Math.random() * palette.length)];
+    const lane = Math.floor(Math.random() * 6);
+    const orbitRadius = core.radius * (0.42 + lane * 0.105 + Math.random() * 0.08);
+    const orbitTilt = -0.62 + lane * 0.22 + (Math.random() - 0.5) * 0.16;
     return {
       ax: anchor.x,
       ay: anchor.y,
@@ -1022,7 +1050,12 @@ function initEnergyFieldCanvas() {
       psx: core.x + anchor.x,
       psy: core.y + anchor.y,
       seed: Math.random() * 1000,
-      spin: 0.7 + Math.random() * 0.95,
+      spin: 0.62 + lane * 0.045 + Math.random() * 0.1,
+      orbitPhase: Math.random() * Math.PI * 2,
+      orbitRadius,
+      orbitTilt,
+      orbitY: core.radius * (0.08 + Math.random() * 0.24),
+      orbitDepth: 0.68 + Math.random() * 0.42,
       size: 0.48 + Math.random() * 1.32,
       alpha: 0.34 + Math.random() * 0.34,
       color,
@@ -1087,18 +1120,27 @@ function initEnergyFieldCanvas() {
   }
 
   function rotatedAnchor(point, now) {
-    const wobble = Math.sin(now * 0.0018 + point.seed) * core.radius * 0.035 * core.energy;
-    let x = (point.ax + Math.cos(point.seed + now * 0.0012) * wobble) * core.compression;
-    let y = (point.ay + Math.sin(point.seed * 1.7 + now * 0.0015) * wobble) * core.compression;
-    let z = (point.az + Math.cos(point.seed * 0.7 + now * 0.0013) * wobble) * core.compression;
+    const orbitAngle = point.orbitPhase + core.spin * point.spin;
+    const wobble = Math.sin(now * 0.0016 + point.seed) * core.radius * 0.016 * core.energy;
+    let x = (Math.cos(orbitAngle) * point.orbitRadius + wobble) * core.compression;
+    let y = (Math.sin(orbitAngle * 1.7 + point.seed) * point.orbitY + Math.cos(orbitAngle + point.seed) * wobble * 0.6) * core.compression;
+    let z = (Math.sin(orbitAngle) * point.orbitRadius * point.orbitDepth) * core.compression;
 
-    const rotY = core.spin * point.spin;
+    const tilt = point.orbitTilt;
+    const cosT = Math.cos(tilt);
+    const sinT = Math.sin(tilt);
+    const y0 = y * cosT - z * sinT;
+    const z0 = y * sinT + z * cosT;
+    y = y0;
+    z = z0;
+
+    const rotY = core.spin * 0.36;
     const cosY = Math.cos(rotY);
     const sinY = Math.sin(rotY);
     const x1 = x * cosY + z * sinY;
     const z1 = -x * sinY + z * cosY;
 
-    const rotX = Math.sin(core.spin * 0.62 + point.seed) * 0.32;
+    const rotX = Math.sin(core.spin * 0.42) * 0.2;
     const cosX = Math.cos(rotX);
     const sinX = Math.sin(rotX);
     return {
@@ -1135,11 +1177,15 @@ function initEnergyFieldCanvas() {
         const radius = core.radius * (pointer.down ? 4.3 : 3.25);
         if (dist < radius) {
           const falloff = Math.pow(1 - dist / radius, 2);
+          const fromCoreX = projected.x - core.x;
+          const fromCoreY = projected.y - core.y;
+          const fromCoreDist = Math.max(24, Math.hypot(fromCoreX, fromCoreY));
+          const burst = (pointer.down ? 0.095 : 0.042) * falloff * pointer.strength;
           const pull = (pointer.down ? 0.14 : 0.066) * falloff * pointer.strength;
           const tangent = (pointer.down ? 0.2 : 0.12) * falloff * pointer.strength;
           const drag = Math.min(1.9, Math.hypot(pointer.vx, pointer.vy) / 8) * falloff;
-          point.vx += ((dx / dist) * pull - (dy / dist) * tangent + pointer.vx * 0.018 * drag) * dt;
-          point.vy += ((dy / dist) * pull + (dx / dist) * tangent + pointer.vy * 0.018 * drag) * dt;
+          point.vx += ((dx / dist) * pull - (dy / dist) * tangent + pointer.vx * 0.018 * drag + (fromCoreX / fromCoreDist) * burst) * dt;
+          point.vy += ((dy / dist) * pull + (dx / dist) * tangent + pointer.vy * 0.018 * drag + (fromCoreY / fromCoreDist) * burst) * dt;
           point.vz += (pointer.down ? -0.34 : 0.14) * falloff * dt;
         }
       }
@@ -1214,6 +1260,155 @@ function initEnergyFieldCanvas() {
       ctx.lineTo(b.x, b.y);
       ctx.stroke();
     }
+  }
+
+  function semanticPosition(node, now) {
+    const expanded = isExpandedMap();
+    const laneRadius = core.radius * (expanded ? 1.18 + node.lane * 0.24 : 1.05 + node.lane * 0.16);
+    const angle = node.phase + core.spin * (0.3 + node.lane * 0.035);
+    const tilt = -0.54 + node.lane * 0.24;
+    let x = Math.cos(angle) * laneRadius;
+    let y = Math.sin(angle * 1.32 + node.lane) * core.radius * (expanded ? 0.2 : 0.13);
+    let z = Math.sin(angle) * laneRadius * 0.82;
+    const cosT = Math.cos(tilt);
+    const sinT = Math.sin(tilt);
+    const y1 = y * cosT - z * sinT;
+    const z1 = y * sinT + z * cosT;
+    const fov = core.radius * 5.1;
+    const scale = fov / (fov + z1);
+    return {
+      node,
+      x: core.x + x * scale,
+      y: core.y + y1 * scale,
+      z: z1,
+      scale,
+      radius: (expanded ? 5.8 : 4.2) * node.weight * Math.max(0.78, scale),
+    };
+  }
+
+  function currentNodeLabel(node) {
+    if (node.key === "github") return `GitHub v${state.version || "0.4.2"}`;
+    if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
+    if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
+    return node.label;
+  }
+
+  function drawSemanticLinks(positions) {
+    const byKey = new Map(positions.map((item) => [item.node.key, item]));
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    semanticLinks.forEach(([aKey, bKey]) => {
+      const a = byKey.get(aKey);
+      const b = byKey.get(bKey);
+      if (!a || !b) return;
+      const alpha = isExpandedMap() ? 0.18 : 0.08;
+      const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
+      gradient.addColorStop(0, `${a.node.glow}11`);
+      gradient.addColorStop(0.5, `rgba(125, 211, 252, ${alpha})`);
+      gradient.addColorStop(1, `${b.node.glow}11`);
+      ctx.strokeStyle = gradient;
+      ctx.lineWidth = Math.max(0.7, (a.scale + b.scale) * 0.38);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  function rectsOverlap(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  function drawSemanticLabel(item, placedLabels = []) {
+    const label = currentNodeLabel(item.node);
+    const type = item.node.type;
+    const padX = 8;
+    const narrow = width < 560;
+    const labelFont = isExpandedMap() ? (narrow ? "11px" : "12px") : "10px";
+    ctx.save();
+    ctx.font = `600 ${labelFont} ${getComputedStyle(document.documentElement).getPropertyValue("--font-sans") || "sans-serif"}`;
+    const labelWidth = ctx.measureText(label).width;
+    ctx.font = `500 10px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+    const typeWidth = ctx.measureText(type).width;
+    const boxWidth = Math.max(labelWidth, typeWidth) + padX * 2;
+    const boxHeight = isExpandedMap() ? (narrow ? 34 : 38) : 28;
+    let x = item.x + item.radius + 8;
+    let y = item.y - boxHeight * 0.5;
+    if (x + boxWidth > width - 8) x = item.x - item.radius - boxWidth - 8;
+    x = Math.max(8, Math.min(width - boxWidth - 8, x));
+    y = Math.max(8, Math.min(height - boxHeight - 8, y));
+    const baseY = y;
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const rect = { x, y, w: boxWidth, h: boxHeight };
+      if (!placedLabels.some((placed) => rectsOverlap(rect, placed))) break;
+      const step = boxHeight + 5;
+      const direction = attempt % 2 === 0 ? 1 : -1;
+      const distance = Math.ceil((attempt + 1) / 2) * step;
+      y = Math.max(8, Math.min(height - boxHeight - 8, baseY + direction * distance));
+    }
+    placedLabels.push({ x, y, w: boxWidth, h: boxHeight });
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "rgba(5, 8, 16, 0.78)";
+    ctx.strokeStyle = "rgba(125, 211, 252, 0.28)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, boxWidth, boxHeight, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = item.node.color;
+    ctx.font = `600 ${labelFont} ${getComputedStyle(document.documentElement).getPropertyValue("--font-sans") || "sans-serif"}`;
+    ctx.fillText(label, x + padX, y + 16);
+    if (isExpandedMap()) {
+      ctx.fillStyle = "rgba(139, 143, 168, 0.92)";
+      ctx.font = `500 ${narrow ? "9px" : "10px"} ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+      ctx.fillText(type, x + padX, y + (narrow ? 28 : 30));
+    }
+    ctx.restore();
+  }
+
+  function drawSemanticNodes(now) {
+    const positions = semanticNodes.map((node) => semanticPosition(node, now)).sort((a, b) => b.z - a.z);
+    const placedLabels = [];
+    drawSemanticLinks(positions);
+    hoveredSemantic = null;
+    if (pointer.active) {
+      let nearest = null;
+      let nearestDistance = Infinity;
+      positions.forEach((item) => {
+        const d = Math.hypot(pointer.x - item.x, pointer.y - item.y);
+        if (d < item.radius + 18 && d < nearestDistance) {
+          nearest = item;
+          nearestDistance = d;
+        }
+      });
+      hoveredSemantic = nearest;
+    }
+
+    positions.forEach((item) => {
+      const hover = hoveredSemantic && hoveredSemantic.node.key === item.node.key;
+      const glowRadius = item.radius * (hover ? 6.8 : 4.8);
+      const gradient = ctx.createRadialGradient(item.x, item.y, 0, item.x, item.y, glowRadius);
+      gradient.addColorStop(0, `${item.node.color}ff`);
+      gradient.addColorStop(0.22, `${item.node.glow}cc`);
+      gradient.addColorStop(1, `${item.node.glow}00`);
+      ctx.globalCompositeOperation = "lighter";
+      ctx.globalAlpha = hover ? 0.96 : 0.7;
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, glowRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = item.node.color;
+      ctx.strokeStyle = item.node.glow;
+      ctx.lineWidth = hover ? 2 : 1.2;
+      ctx.beginPath();
+      ctx.arc(item.x, item.y, item.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (isExpandedMap() || hover) drawSemanticLabel(item, placedLabels);
+    });
   }
 
   function drawParticle(point, now) {
@@ -1293,6 +1488,7 @@ function initEnergyFieldCanvas() {
     drawCoreAura(now);
     drawDragTrail();
     particles.slice().sort((a, b) => b.z - a.z).forEach((point) => drawParticle(point, now));
+    drawSemanticNodes(now);
     drawForceField(now);
     drawPulses();
     ctx.globalAlpha = 1;
