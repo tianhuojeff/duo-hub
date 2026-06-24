@@ -24,7 +24,7 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 GATEWAY_CACHE_TTL = int(os.environ.get("DUO_GATEWAY_CACHE_TTL", "30"))
 GATEWAY_CHECK_TIMEOUT = float(os.environ.get("DUO_GATEWAY_CHECK_TIMEOUT", "1"))
 

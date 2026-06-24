@@ -912,7 +912,30 @@ function initEnergyFieldCanvas() {
   let dpr = 1;
   let lastTime = performance.now();
   let targetEnergy = 0.86;
+  let densityScale = 0.78;
   let lastPinchDistance = null;
+
+  function desiredParticleCount() {
+    const expanded = elStarMapWindow && elStarMapWindow.classList.contains("is-expanded");
+    const baseCount = Math.max(96, Math.min(expanded ? 560 : 320, Math.floor((width * height) / 780)));
+    return Math.max(56, Math.round(baseCount * densityScale));
+  }
+
+  function syncParticleCount(force = false) {
+    const targetCount = desiredParticleCount();
+    if (force) {
+      particles.length = 0;
+      for (let i = 0; i < targetCount; i++) particles.push(makeParticle());
+      return;
+    }
+    if (particles.length < targetCount) {
+      const addCount = Math.min(48, targetCount - particles.length);
+      for (let i = 0; i < addCount; i++) particles.push(makeParticle());
+    } else if (particles.length > targetCount) {
+      const removeCount = Math.min(48, particles.length - targetCount);
+      particles.splice(Math.max(0, particles.length - removeCount), removeCount);
+    }
+  }
 
   function resize() {
     const rect = host.getBoundingClientRect();
@@ -957,12 +980,11 @@ function initEnergyFieldCanvas() {
     elGraphCanvas.style.height = "100%";
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    const targetCount = Math.max(220, Math.min(elStarMapWindow && elStarMapWindow.classList.contains("is-expanded") ? 920 : 560, Math.floor((width * height) / 470)));
-    if (changed || Math.abs(particles.length - targetCount) > 28) {
-      particles.length = 0;
-      for (let i = 0; i < targetCount; i++) {
-        particles.push(makeParticle());
-      }
+    const targetCount = desiredParticleCount();
+    if (changed) {
+      syncParticleCount(true);
+    } else if (Math.abs(particles.length - targetCount) > 10) {
+      syncParticleCount(false);
     }
     updateParticles(1, performance.now());
     draw(performance.now());
@@ -971,12 +993,13 @@ function initEnergyFieldCanvas() {
 
   function randomAnchor() {
     const theta = Math.random() * Math.PI * 2;
-    const phi = Math.acos(Math.random() * 2 - 1);
-    const shell = Math.pow(Math.random(), 0.42);
-    const radius = core.radius * (0.18 + shell * 0.98);
+    const banded = Math.random() < 0.62;
+    const phi = banded ? Math.PI * 0.5 + (Math.random() - 0.5) * 0.92 : Math.acos(Math.random() * 2 - 1);
+    const shell = Math.random() < 0.74 ? 0.66 + Math.random() * 0.44 : 0.22 + Math.random() * 0.38;
+    const radius = core.radius * shell;
     return {
       x: Math.sin(phi) * Math.cos(theta) * radius,
-      y: Math.cos(phi) * radius * 0.74,
+      y: Math.cos(phi) * radius * (banded ? 0.52 : 0.78),
       z: Math.sin(phi) * Math.sin(theta) * radius,
     };
   }
@@ -1000,8 +1023,8 @@ function initEnergyFieldCanvas() {
       psy: core.y + anchor.y,
       seed: Math.random() * 1000,
       spin: 0.7 + Math.random() * 0.95,
-      size: 0.72 + Math.random() * 1.9,
-      alpha: 0.58 + Math.random() * 0.42,
+      size: 0.48 + Math.random() * 1.32,
+      alpha: 0.34 + Math.random() * 0.34,
       color,
     };
   }
@@ -1018,8 +1041,13 @@ function initEnergyFieldCanvas() {
     if (point) {
       pointer.lastX = pointer.x;
       pointer.lastY = pointer.y;
-      pointer.x += (point.x - pointer.x) * 0.44;
-      pointer.y += (point.y - pointer.y) * 0.44;
+      if (!pointer.active || now - pointer.lastMove > 120) {
+        pointer.x = point.x;
+        pointer.y = point.y;
+      } else {
+        pointer.x += (point.x - pointer.x) * 0.82;
+        pointer.y += (point.y - pointer.y) * 0.82;
+      }
       pointer.vx = pointer.x - pointer.lastX;
       pointer.vy = pointer.y - pointer.lastY;
       pointer.active = true;
@@ -1037,19 +1065,19 @@ function initEnergyFieldCanvas() {
       pointer.vy *= 0.85;
       targetEnergy = 0.86;
     }
-    pointer.strength += ((pointer.active ? 1 : 0) - pointer.strength) * 0.07;
-    core.energy += (targetEnergy - core.energy) * 0.045;
+    pointer.strength += ((pointer.active ? 1 : 0) - pointer.strength) * 0.18;
+    core.energy += (targetEnergy - core.energy) * 0.08;
   }
 
   function updateCore(dt) {
     const idleX = width * 0.5;
     const idleY = height * 0.5;
-    core.tx = idleX + (pointer.x - idleX) * pointer.strength * 0.84;
-    core.ty = idleY + (pointer.y - idleY) * pointer.strength * 0.84;
-    core.vx += (core.tx - core.x) * 0.07 * dt;
-    core.vy += (core.ty - core.y) * 0.07 * dt;
-    core.vx *= 0.78;
-    core.vy *= 0.78;
+    core.tx = idleX + (pointer.x - idleX) * pointer.strength * 0.96;
+    core.ty = idleY + (pointer.y - idleY) * pointer.strength * 0.96;
+    core.vx += (core.tx - core.x) * 0.16 * dt;
+    core.vy += (core.ty - core.y) * 0.16 * dt;
+    core.vx *= 0.66;
+    core.vy *= 0.66;
     core.x += core.vx * dt;
     core.y += core.vy * dt;
 
@@ -1145,13 +1173,13 @@ function initEnergyFieldCanvas() {
 
   function drawCoreAura(now) {
     const pulse = 1 + Math.sin(now * 0.004) * 0.05 + pointer.strength * 0.18;
-    const auraRadius = core.radius * (2.15 + pointer.strength * 0.7);
+    const auraRadius = core.radius * (1.72 + pointer.strength * 0.42);
     const aura = ctx.createRadialGradient(core.x, core.y, 0, core.x, core.y, auraRadius);
-    aura.addColorStop(0, "rgba(240, 251, 255, 0.92)");
-    aura.addColorStop(0.08, "rgba(125, 211, 252, 0.6)");
-    aura.addColorStop(0.35, "rgba(14, 165, 233, 0.24)");
+    aura.addColorStop(0, "rgba(240, 251, 255, 0.42)");
+    aura.addColorStop(0.1, "rgba(125, 211, 252, 0.34)");
+    aura.addColorStop(0.36, "rgba(14, 165, 233, 0.16)");
     aura.addColorStop(1, "rgba(14, 165, 233, 0)");
-    ctx.globalAlpha = 0.95;
+    ctx.globalAlpha = 0.72;
     ctx.fillStyle = aura;
     ctx.beginPath();
     ctx.arc(core.x, core.y, auraRadius, 0, Math.PI * 2);
@@ -1160,7 +1188,7 @@ function initEnergyFieldCanvas() {
     ctx.lineWidth = 1.2;
     for (let i = 0; i < 3; i++) {
       const radius = core.radius * (0.86 + i * 0.28) * pulse;
-      ctx.strokeStyle = `rgba(125, 211, 252, ${0.28 - i * 0.055})`;
+      ctx.strokeStyle = `rgba(125, 211, 252, ${0.34 - i * 0.06})`;
       ctx.beginPath();
       ctx.ellipse(core.x, core.y, radius, radius * (0.45 + i * 0.08), core.spin * (0.45 + i * 0.16), 0, Math.PI * 2);
       ctx.stroke();
@@ -1192,24 +1220,24 @@ function initEnergyFieldCanvas() {
     const speed = Math.hypot(point.sx - point.psx, point.sy - point.psy);
     const depth = Math.max(0.45, Math.min(1.55, point.scale || 1));
     const flicker = 0.78 + Math.sin(now * 0.003 + point.seed) * 0.22;
-    const alpha = Math.min(1, point.alpha * flicker * (0.62 + depth * 0.28) * (0.92 + pointer.strength * 0.24));
-    const radius = point.size * depth * (1.35 + pointer.strength * 0.32);
+    const alpha = Math.min(0.78, point.alpha * flicker * (0.48 + depth * 0.22) * (0.84 + pointer.strength * 0.18));
+    const radius = point.size * depth * (1.05 + pointer.strength * 0.18);
 
     if (speed > 0.35) {
-      ctx.globalAlpha = Math.min(0.48, speed * 0.045) * alpha;
+      ctx.globalAlpha = Math.min(0.38, speed * 0.038) * alpha;
       ctx.strokeStyle = point.color.glow;
-      ctx.lineWidth = Math.max(1, radius * 0.65);
+      ctx.lineWidth = Math.max(0.75, radius * 0.52);
       ctx.beginPath();
       ctx.moveTo(point.psx, point.psy);
       ctx.lineTo(point.sx, point.sy);
       ctx.stroke();
     }
 
-    const glowRadius = radius * (6 + core.energy * 1.7);
+    const glowRadius = radius * (3.15 + core.energy * 0.95);
     const gradient = ctx.createRadialGradient(point.sx, point.sy, 0, point.sx, point.sy, glowRadius);
     gradient.addColorStop(0, `${point.color.core}ff`);
-    gradient.addColorStop(0.22, `${point.color.glow}d8`);
-    gradient.addColorStop(0.62, `${point.color.glow}42`);
+    gradient.addColorStop(0.18, `${point.color.glow}b8`);
+    gradient.addColorStop(0.54, `${point.color.glow}24`);
     gradient.addColorStop(1, `${point.color.glow}00`);
     ctx.globalAlpha = alpha;
     ctx.fillStyle = gradient;
@@ -1217,7 +1245,7 @@ function initEnergyFieldCanvas() {
     ctx.arc(point.sx, point.sy, glowRadius, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.globalAlpha = Math.min(1, alpha + 0.26);
+    ctx.globalAlpha = Math.min(0.92, alpha + 0.22);
     ctx.fillStyle = point.color.core;
     ctx.beginPath();
     ctx.arc(point.sx, point.sy, Math.max(0.75, radius * 0.56), 0, Math.PI * 2);
@@ -1357,7 +1385,11 @@ function initEnergyFieldCanvas() {
   }, { passive: true });
   host.addEventListener("wheel", (event) => {
     event.preventDefault();
-    targetEnergy = Math.max(0.72, Math.min(1.95, targetEnergy + (event.deltaY < 0 ? 0.08 : -0.08)));
+    const direction = event.deltaY < 0 ? 1 : -1;
+    densityScale = Math.max(0.36, Math.min(1.38, densityScale + direction * 0.12));
+    syncParticleCount(false);
+    targetEnergy = Math.max(0.72, Math.min(1.95, targetEnergy + direction * 0.035));
+    addPulse(pointer.active ? pointer.x : core.x, pointer.active ? pointer.y : core.y, 0.75 + densityScale * 0.3);
   }, { passive: false });
 
   if (resize()) {
