@@ -877,18 +877,18 @@ function initEnergyFieldCanvas() {
   const dragTrail = [];
   const pointers = new Map();
   const semanticNodes = [
-    { key: "user", label: "天火需求", type: "需求", color: "#f8fafc", glow: "#a5f3fc", lane: 0, phase: 0.12, weight: 1.12 },
-    { key: "claude", label: "Claude", type: "代码执行", color: "#dbeafe", glow: "#3b82f6", lane: 1, phase: 0.92, weight: 1.05 },
-    { key: "lobster", label: "龙虾", type: "外部执行", color: "#ffedd5", glow: "#f59e0b", lane: 1, phase: 2.18, weight: 1.05 },
-    { key: "codex", label: "Codex", type: "协调验证", color: "#dcfce7", glow: "#22c55e", lane: 1, phase: 3.46, weight: 1.05 },
-    { key: "memory", label: "共享记忆", type: "Memory", color: "#f5f3ff", glow: "#a78bfa", lane: 2, phase: 4.12, weight: 0.94 },
-    { key: "tasks", label: "任务队列", type: "Tasks", color: "#e0f2fe", glow: "#38bdf8", lane: 2, phase: 5.12, weight: 0.9 },
-    { key: "division", label: "协商分工", type: "Protocol", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92 },
-    { key: "investment", label: "投资学习", type: "Learning", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86 },
-    { key: "strategy", label: "策略版本", type: "Backtest", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86 },
-    { key: "github", label: "GitHub v0.4.4", type: "Version", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78 },
-    { key: "log", label: "工作日志", type: "Log", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8 },
-    { key: "telegram", label: "TG 桥", type: "Bridge", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76 },
+    { key: "user", symbol: "Th", label: "天火需求", type: "REQUEST", color: "#f8fafc", glow: "#a5f3fc", lane: 0, phase: 0.12, weight: 1.12, metric: "INPUT VECTOR" },
+    { key: "claude", symbol: "Cl", label: "Claude", type: "CODE", color: "#dbeafe", glow: "#3b82f6", lane: 1, phase: 0.92, weight: 1.05, metric: "EXECUTOR" },
+    { key: "lobster", symbol: "Lb", label: "龙虾", type: "OPS", color: "#ffedd5", glow: "#f59e0b", lane: 1, phase: 2.18, weight: 1.05, metric: "EXTERNAL" },
+    { key: "codex", symbol: "Cx", label: "Codex", type: "COORD", color: "#dcfce7", glow: "#22c55e", lane: 1, phase: 3.46, weight: 1.05, metric: "VERIFIER" },
+    { key: "memory", symbol: "Mm", label: "共享记忆", type: "MEMORY", color: "#f5f3ff", glow: "#a78bfa", lane: 2, phase: 4.12, weight: 0.94, metric: "PERSIST" },
+    { key: "tasks", symbol: "Tq", label: "任务队列", type: "TASKS", color: "#e0f2fe", glow: "#38bdf8", lane: 2, phase: 5.12, weight: 0.9, metric: "QUEUE" },
+    { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
+    { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
+    { key: "strategy", symbol: "St", label: "策略版本", type: "BACKTEST", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86, metric: "EVOLVE" },
+    { key: "github", symbol: "Gh", label: "GitHub v0.4.5", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
+    { key: "log", symbol: "Lg", label: "工作日志", type: "LOG", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8, metric: "TRACE" },
+    { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
   const semanticLinks = [
     ["user", "claude"], ["user", "lobster"], ["user", "codex"],
@@ -1061,6 +1061,44 @@ function initEnergyFieldCanvas() {
     }
   }
 
+  function drawSegmentedArc(cx, cy, radius, start, end, color, alpha, widthValue) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = widthValue;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, start, end);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawHudBackplane(now) {
+    const expanded = isExpandedMap();
+    const scanX = (now * 0.022) % Math.max(1, width);
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(125, 211, 252, 0.07)";
+    for (let i = 0; i < 9; i++) {
+      const y = height * (0.16 + i * 0.078);
+      ctx.beginPath();
+      ctx.moveTo(width * 0.18, y);
+      ctx.lineTo(width * 0.82, y + Math.sin(now * 0.001 + i) * 10);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = "rgba(125, 211, 252, 0.12)";
+    ctx.beginPath();
+    ctx.moveTo(scanX, 0);
+    ctx.lineTo(scanX - width * 0.08, height);
+    ctx.stroke();
+    if (expanded) {
+      ctx.strokeStyle = "rgba(125, 211, 252, 0.14)";
+      ctx.strokeRect(width * 0.06, height * 0.18, width * 0.22, height * 0.56);
+      ctx.strokeRect(width * 0.72, height * 0.2, width * 0.22, height * 0.52);
+    }
+    ctx.restore();
+  }
+
   function drawCoreAura(now) {
     const expanded = isExpandedMap();
     const pulse = 1 + Math.sin(now * 0.004) * 0.04 + pointer.strength * 0.1;
@@ -1076,6 +1114,18 @@ function initEnergyFieldCanvas() {
     ctx.arc(core.x, core.y, auraRadius, 0, Math.PI * 2);
     ctx.fill();
 
+    const reactorRadius = core.radius * (expanded ? 0.44 : 0.34);
+    const reactor = ctx.createRadialGradient(core.x, core.y, 0, core.x, core.y, reactorRadius);
+    reactor.addColorStop(0, "rgba(240, 251, 255, 0.9)");
+    reactor.addColorStop(0.22, "rgba(125, 211, 252, 0.42)");
+    reactor.addColorStop(0.78, "rgba(14, 165, 233, 0.08)");
+    reactor.addColorStop(1, "rgba(14, 165, 233, 0)");
+    ctx.globalAlpha = expanded ? 0.54 : 0.68;
+    ctx.fillStyle = reactor;
+    ctx.beginPath();
+    ctx.arc(core.x, core.y, reactorRadius, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.lineWidth = expanded ? 1.15 : 1.05;
     for (let i = 0; i < 7; i++) {
       const radius = core.radius * (0.72 + i * 0.105) * pulse;
@@ -1085,6 +1135,81 @@ function initEnergyFieldCanvas() {
       ctx.ellipse(core.x, core.y, radius, radius * (0.34 + i * 0.055), tilt, 0, Math.PI * 2);
       ctx.stroke();
     }
+
+    for (let i = 0; i < 28; i++) {
+      const a = i * Math.PI * 2 / 28 + core.spin * 0.32;
+      const radius = core.radius * (expanded ? 1.02 : 0.92);
+      const inner = radius - (i % 4 === 0 ? 12 : 6);
+      ctx.strokeStyle = i % 4 === 0 ? "rgba(186, 230, 253, 0.42)" : "rgba(125, 211, 252, 0.2)";
+      ctx.beginPath();
+      ctx.moveTo(core.x + Math.cos(a) * inner, core.y + Math.sin(a) * inner);
+      ctx.lineTo(core.x + Math.cos(a) * radius, core.y + Math.sin(a) * radius);
+      ctx.stroke();
+    }
+
+    for (let i = 0; i < 4; i++) {
+      const radius = core.radius * (0.5 + i * 0.17);
+      const start = core.spin * (0.5 + i * 0.12) + i * 0.65;
+      drawSegmentedArc(core.x, core.y, radius, start, start + Math.PI * (0.34 + i * 0.08), "#bae6fd", 0.28 - i * 0.035, 1.2);
+      drawSegmentedArc(core.x, core.y, radius, start + Math.PI, start + Math.PI * 1.52, "#38bdf8", 0.22 - i * 0.025, 1);
+    }
+
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "rgba(186, 230, 253, 0.9)";
+    ctx.font = `600 ${expanded ? "11px" : "8px"} ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+    ctx.textAlign = "center";
+    ctx.fillText("DUO CORE", core.x, core.y - 3);
+    ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
+    ctx.font = `500 ${expanded ? "9px" : "7px"} ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+    ctx.fillText(`v${state.version || "0.4.5"}`, core.x, core.y + (expanded ? 11 : 8));
+    ctx.textAlign = "start";
+  }
+
+  function drawHologramSphere(now) {
+    const expanded = isExpandedMap();
+    const radius = core.radius * (expanded ? 1.42 : 1.1);
+    const latitudes = expanded ? 7 : 5;
+    const meridians = expanded ? 11 : 7;
+    ctx.save();
+    ctx.translate(core.x, core.y);
+    ctx.rotate(core.spin * 0.08);
+    ctx.globalCompositeOperation = "lighter";
+    ctx.lineWidth = expanded ? 1.05 : 0.8;
+
+    for (let i = 1; i <= latitudes; i++) {
+      const t = (i / (latitudes + 1)) * 2 - 1;
+      const y = t * radius * 0.58;
+      const rx = Math.sqrt(Math.max(0, 1 - t * t)) * radius;
+      ctx.strokeStyle = `rgba(125, 211, 252, ${0.065 + (1 - Math.abs(t)) * 0.045})`;
+      ctx.beginPath();
+      ctx.ellipse(0, y, rx, rx * 0.18, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    for (let i = 0; i < meridians; i++) {
+      const angle = (i / meridians) * Math.PI + core.spin * 0.04;
+      ctx.strokeStyle = `rgba(56, 189, 248, ${i % 3 === 0 ? 0.12 : 0.07})`;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, radius, radius * 0.36, angle, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    const scanAngle = core.spin * 0.46 + Math.sin(now * 0.0012) * 0.35;
+    ctx.strokeStyle = "rgba(186, 230, 253, 0.24)";
+    ctx.lineWidth = expanded ? 1.2 : 0.9;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(scanAngle) * -radius * 0.92, Math.sin(scanAngle) * -radius * 0.2);
+    ctx.lineTo(Math.cos(scanAngle) * radius * 0.92, Math.sin(scanAngle) * radius * 0.2);
+    ctx.stroke();
+
+    if (expanded) {
+      ctx.strokeStyle = "rgba(125, 211, 252, 0.12)";
+      for (let i = 0; i < 4; i++) {
+        const r = radius * (0.38 + i * 0.13);
+        ctx.strokeRect(-r * 0.72, -r * 0.72, r * 1.44, r * 1.44);
+      }
+    }
+    ctx.restore();
   }
 
   function drawDragTrail() {
@@ -1153,10 +1278,20 @@ function initEnergyFieldCanvas() {
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.4.4"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.4.5"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
+  }
+
+  function nodeStatus(node) {
+    if (node.key === "claude") return state.claude_status || "idle";
+    if (node.key === "lobster") return state.lobster_status || "idle";
+    if (node.key === "codex") return state.codex_status || "idle";
+    if (node.key === "tasks") return state.phase || "idle";
+    if (node.key === "division") return state.division_status || "stable";
+    if (node.key === "github") return state.version || "0.4.5";
+    return node.metric;
   }
 
   function drawSemanticLinks(positions) {
@@ -1167,7 +1302,7 @@ function initEnergyFieldCanvas() {
       const a = byKey.get(aKey);
       const b = byKey.get(bKey);
       if (!a || !b) return;
-      const alpha = isExpandedMap() ? 0.2 : 0.12;
+      const alpha = isExpandedMap() ? 0.24 : 0.15;
       const gradient = ctx.createLinearGradient(a.x, a.y, b.x, b.y);
       gradient.addColorStop(0, `${a.node.glow}11`);
       gradient.addColorStop(0.5, `rgba(125, 211, 252, ${alpha})`);
@@ -1176,10 +1311,107 @@ function initEnergyFieldCanvas() {
       ctx.lineWidth = Math.max(0.9, (a.scale + b.scale) * 0.42);
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
-      ctx.lineTo(b.x, b.y);
+      const mx = (a.x + b.x) * 0.5 + Math.sin(core.spin + a.x * 0.01) * 8;
+      const my = (a.y + b.y) * 0.5 + Math.cos(core.spin + b.y * 0.01) * 8;
+      ctx.quadraticCurveTo(mx, my, b.x, b.y);
       ctx.stroke();
     });
     ctx.restore();
+  }
+
+  function drawProjectionRays(positions, now) {
+    if (!isExpandedMap()) return;
+    const selected = hoveredSemantic || positions.reduce((best, item) => (
+      !best || item.scale > best.scale ? item : best
+    ), null);
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    positions.forEach((item, index) => {
+      const active = selected && selected.node.key === item.node.key;
+      const alpha = active ? 0.36 : 0.075;
+      const wobble = Math.sin(now * 0.0015 + index) * 7;
+      const midX = core.x + (item.x - core.x) * 0.62 + wobble;
+      const midY = core.y + (item.y - core.y) * 0.62 - wobble * 0.45;
+      ctx.strokeStyle = active ? `${item.node.glow}aa` : "rgba(125, 211, 252, 0.16)";
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = active ? 1.25 : 0.75;
+      ctx.beginPath();
+      ctx.moveTo(core.x, core.y);
+      ctx.quadraticCurveTo(midX, midY, item.x, item.y);
+      ctx.stroke();
+
+      if (active) {
+        ctx.globalAlpha = 0.72;
+        ctx.strokeStyle = item.node.glow;
+        const px = core.x + (item.x - core.x) * 0.76;
+        const py = core.y + (item.y - core.y) * 0.76;
+        ctx.strokeRect(px - 5, py - 5, 10, 10);
+      }
+    });
+    ctx.restore();
+  }
+
+  function nodeModuleMetrics(item) {
+    const expanded = isExpandedMap();
+    const size = item.radius * (expanded ? 3.1 : 2.6);
+    const w = size * (expanded ? 1.38 : 1.18);
+    const h = size * (expanded ? 1.1 : 1);
+    return {
+      size,
+      w,
+      h,
+      x: item.x - w * 0.5,
+      y: item.y - h * 0.5,
+    };
+  }
+
+  function drawNodeModule(item, hover) {
+    const node = item.node;
+    const { size, w, h, x, y } = nodeModuleMetrics(item);
+    const expanded = isExpandedMap();
+    const alpha = hover ? 0.96 : 0.76;
+
+    const glow = ctx.createRadialGradient(item.x, item.y, 0, item.x, item.y, size * (hover ? 2.2 : 1.7));
+    glow.addColorStop(0, `${node.color}ee`);
+    glow.addColorStop(0.28, `${node.glow}99`);
+    glow.addColorStop(1, `${node.glow}00`);
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(item.x, item.y, size * (hover ? 2.2 : 1.7), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "rgba(5, 8, 16, 0.78)";
+    ctx.strokeStyle = node.glow;
+    ctx.lineWidth = hover ? 1.8 : 1.1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 5);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = `${node.glow}66`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + h * 0.28);
+    ctx.lineTo(x + w - 4, y + h * 0.28);
+    ctx.stroke();
+
+    ctx.fillStyle = node.color;
+    ctx.textAlign = "center";
+    ctx.font = `700 ${Math.max(10, h * 0.42)}px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+    ctx.fillText(node.symbol, item.x, y + h * 0.66);
+    ctx.fillStyle = `${node.color}cc`;
+    ctx.font = `600 ${Math.max(6, h * 0.18)}px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+    ctx.fillText(node.type, item.x, y + h * 0.22);
+    ctx.textAlign = "start";
+
+    if (expanded || hover) {
+      ctx.fillStyle = `${node.glow}dd`;
+      ctx.fillRect(x + 4, y + h - 5, Math.max(6, (w - 8) * (0.42 + item.scale * 0.22)), 1);
+    }
   }
 
   function rectsOverlap(a, b) {
@@ -1205,13 +1437,21 @@ function initEnergyFieldCanvas() {
     x = Math.max(8, Math.min(width - boxWidth - 8, x));
     y = Math.max(8, Math.min(height - boxHeight - 8, y));
     const baseY = y;
+    let placed = false;
     for (let attempt = 0; attempt < 12; attempt++) {
       const rect = { x, y, w: boxWidth, h: boxHeight };
-      if (!placedLabels.some((placed) => rectsOverlap(rect, placed))) break;
+      if (!placedLabels.some((labelRect) => rectsOverlap(rect, labelRect))) {
+        placed = true;
+        break;
+      }
       const step = boxHeight + 5;
       const direction = attempt % 2 === 0 ? 1 : -1;
       const distance = Math.ceil((attempt + 1) / 2) * step;
       y = Math.max(8, Math.min(height - boxHeight - 8, baseY + direction * distance));
+    }
+    if (!placed) {
+      ctx.restore();
+      return false;
     }
     placedLabels.push({ x, y, w: boxWidth, h: boxHeight });
     ctx.globalCompositeOperation = "source-over";
@@ -1231,12 +1471,27 @@ function initEnergyFieldCanvas() {
       ctx.fillText(type, x + padX, y + (narrow ? 28 : 30));
     }
     ctx.restore();
+    return true;
   }
 
-  function drawSemanticNodes(now) {
-    const positions = semanticNodes.map((node) => semanticPosition(node, now)).sort((a, b) => b.z - a.z);
-    const placedLabels = [];
-    drawSemanticLinks(positions);
+  function shouldShowSemanticLabel(item, hover) {
+    if (hover) return true;
+    if (!isExpandedMap()) return false;
+    if (width < 560) {
+      return ["user", "codex", "tasks", "division", "investment"].includes(item.node.key);
+    }
+    return true;
+  }
+
+  function getSemanticPositions(now) {
+    return semanticNodes.map((node) => semanticPosition(node, now)).sort((a, b) => b.z - a.z);
+  }
+
+  function drawSemanticNodes(positions, now) {
+    const placedLabels = positions.map((item) => {
+      const rect = nodeModuleMetrics(item);
+      return { x: rect.x - 4, y: rect.y - 4, w: rect.w + 8, h: rect.h + 8 };
+    });
     hoveredSemantic = null;
     if (pointer.active) {
       let nearest = null;
@@ -1251,30 +1506,85 @@ function initEnergyFieldCanvas() {
       hoveredSemantic = nearest;
     }
 
+    drawProjectionRays(positions, now);
+    drawSemanticLinks(positions);
     positions.forEach((item) => {
       const hover = hoveredSemantic && hoveredSemantic.node.key === item.node.key;
-      const glowRadius = item.radius * (hover ? 4.8 : 3.4);
-      const gradient = ctx.createRadialGradient(item.x, item.y, 0, item.x, item.y, glowRadius);
-      gradient.addColorStop(0, `${item.node.color}ff`);
-      gradient.addColorStop(0.22, `${item.node.glow}cc`);
-      gradient.addColorStop(1, `${item.node.glow}00`);
-      ctx.globalCompositeOperation = "lighter";
-      ctx.globalAlpha = hover ? 0.95 : 0.78;
-      ctx.fillStyle = gradient;
-      ctx.beginPath();
-      ctx.arc(item.x, item.y, glowRadius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalCompositeOperation = "source-over";
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = item.node.color;
-      ctx.strokeStyle = item.node.glow;
-      ctx.lineWidth = hover ? 2.4 : 1.4;
-      ctx.beginPath();
-      ctx.arc(item.x, item.y, item.radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      if (isExpandedMap() || hover) drawSemanticLabel(item, placedLabels);
+      drawNodeModule(item, hover);
+      if (shouldShowSemanticLabel(item, hover)) drawSemanticLabel(item, placedLabels);
     });
+  }
+
+  function drawReadoutPanel(x, y, w, h, title, rows, align = "left") {
+    ctx.save();
+    ctx.globalCompositeOperation = "source-over";
+    ctx.fillStyle = "rgba(5, 8, 16, 0.62)";
+    ctx.strokeStyle = "rgba(125, 211, 252, 0.34)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 7);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "rgba(125, 211, 252, 0.88)";
+    ctx.font = `700 11px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+    ctx.fillText(title, x + 12, y + 18);
+    ctx.strokeStyle = "rgba(125, 211, 252, 0.2)";
+    ctx.beginPath();
+    ctx.moveTo(x + 10, y + 25);
+    ctx.lineTo(x + w - 10, y + 25);
+    ctx.stroke();
+    rows.forEach((row, idx) => {
+      const yy = y + 44 + idx * 24;
+      ctx.fillStyle = row.color || "rgba(225, 228, 237, 0.9)";
+      ctx.font = `600 10px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
+      ctx.fillText(row.key, x + 12, yy);
+      ctx.fillStyle = "rgba(139, 143, 168, 0.92)";
+      const value = String(row.value);
+      if (align === "right") {
+        const tw = ctx.measureText(value).width;
+        ctx.fillText(value, x + w - 12 - tw, yy);
+      } else {
+        ctx.fillText(value, x + 92, yy);
+      }
+      const barWidth = Math.max(18, Math.min(w - 24, (row.level || 0.5) * (w - 24)));
+      ctx.fillStyle = row.color ? `${row.color}55` : "rgba(56, 189, 248, 0.28)";
+      ctx.fillRect(x + 12, yy + 7, barWidth, 2);
+    });
+    ctx.restore();
+  }
+
+  function drawExpandedConsole(positions, now) {
+    if (!isExpandedMap() || width < 760) return;
+    const agentRows = [
+      { key: "CLAUDE", value: state.claude_status || "idle", color: "#3b82f6", level: state.claude_status === "working" ? 0.92 : 0.68 },
+      { key: "LOBSTER", value: state.lobster_status || "idle", color: "#f59e0b", level: state.lobster_status === "working" ? 0.88 : 0.62 },
+      { key: "CODEX", value: state.codex_status || "idle", color: "#22c55e", level: state.codex_status === "working" ? 0.94 : 0.72 },
+    ];
+    const protocolRows = [
+      { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
+      { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },
+      { key: "BUILD", value: `v${state.version || "0.4.5"}`, color: "#e1e4ed", level: 0.84 },
+    ];
+    const systemRows = [
+      { key: "MEMORY", value: "linked", color: "#a78bfa", level: 0.82 },
+      { key: "TASKS", value: state.active_task_id || "standby", color: "#38bdf8", level: state.active_task_id ? 0.74 : 0.42 },
+      { key: "LOG", value: "armed", color: "#d946ef", level: 0.7 },
+    ];
+    drawReadoutPanel(width * 0.055, height * 0.11, 190, 126, "AGENT STACK", agentRows);
+    drawReadoutPanel(width - 245, height * 0.12, 198, 126, "PROTOCOL", protocolRows, "right");
+    drawReadoutPanel(width * 0.055, height - 168, 220, 126, "WORKFLOW TRACE", systemRows);
+
+    const nearest = hoveredSemantic || positions[Math.floor(positions.length / 2)];
+    if (nearest) {
+      const x = width - 288;
+      const y = height - 168;
+      const rows = [
+        { key: "NODE", value: nearest.node.symbol, color: nearest.node.glow, level: 0.9 },
+        { key: "ROLE", value: nearest.node.type, color: nearest.node.glow, level: 0.64 },
+        { key: "STATE", value: nodeStatus(nearest.node), color: nearest.node.glow, level: 0.72 },
+      ];
+      drawReadoutPanel(x, y, 240, 126, "SELECTED ELEMENT", rows, "right");
+    }
   }
 
   function drawForceField(now) {
@@ -1315,9 +1625,13 @@ function initEnergyFieldCanvas() {
     ctx.clearRect(0, 0, width, height);
     ctx.globalCompositeOperation = "lighter";
     ctx.lineCap = "round";
+    drawHudBackplane(now);
+    drawHologramSphere(now);
     drawCoreAura(now);
     drawDragTrail();
-    drawSemanticNodes(now);
+    const positions = getSemanticPositions(now);
+    drawSemanticNodes(positions, now);
+    drawExpandedConsole(positions, now);
     drawForceField(now);
     drawPulses();
     ctx.globalAlpha = 1;
