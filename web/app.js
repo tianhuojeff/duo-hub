@@ -888,7 +888,7 @@ function initEnergyFieldCanvas() {
     { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
     { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
     { key: "strategy", symbol: "St", label: "策略版本", type: "BACKTEST", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86, metric: "EVOLVE" },
-    { key: "github", symbol: "Gh", label: "GitHub v0.5.0", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
+    { key: "github", symbol: "Gh", label: "GitHub v0.5.1", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
     { key: "log", symbol: "Lg", label: "工作日志", type: "LOG", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8, metric: "TRACE" },
     { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
@@ -933,13 +933,18 @@ function initEnergyFieldCanvas() {
   let lastPinchDistance = null;
   let hoveredSemantic = null;
   const orbit = {
-    yaw: 0,
-    pitch: 0,
-    yawVelocity: 0,
-    pitchVelocity: 0,
+    qx: 0,
+    qy: 0,
+    qz: 0,
+    qw: 1,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    visualSpin: 0,
     dragging: false,
     lastX: 0,
     lastY: 0,
+    lastBall: null,
   };
   const gesture = {
     enabled: false,
@@ -1080,12 +1085,16 @@ function initEnergyFieldCanvas() {
     core.compression += (targetCompression - core.compression) * 0.055 * dt;
     core.spin += (0.008 + core.energy * 0.012) * dt;
 
-    orbit.yaw += orbit.yawVelocity * dt;
-    orbit.pitch += orbit.pitchVelocity * dt;
-    orbit.pitch = Math.max(-0.82, Math.min(0.82, orbit.pitch));
+    const angularSpeed = Math.hypot(orbit.vx, orbit.vy, orbit.vz);
+    if (angularSpeed > 0.00001) {
+      applyOrbitAxisAngle(orbit.vx, orbit.vy, orbit.vz, angularSpeed * dt);
+      orbit.visualSpin += (orbit.vy * 0.62 + orbit.vx * 0.18 + orbit.vz * 0.2) * dt;
+    }
     const damping = orbit.dragging ? 0.86 : 0.94;
-    orbit.yawVelocity *= Math.pow(damping, dt);
-    orbit.pitchVelocity *= Math.pow(damping, dt);
+    const decay = Math.pow(damping, dt);
+    orbit.vx *= decay;
+    orbit.vy *= decay;
+    orbit.vz *= decay;
   }
 
   function updateParticles(dt, now) {
@@ -1185,7 +1194,7 @@ function initEnergyFieldCanvas() {
     ctx.lineWidth = expanded ? 1.15 : 1.05;
     for (let i = 0; i < 7; i++) {
       const radius = core.radius * (0.72 + i * 0.105) * pulse;
-      const tilt = core.spin * (0.28 + i * 0.04) + i * 0.48 + orbit.yaw * 0.24;
+      const tilt = core.spin * (0.28 + i * 0.04) + i * 0.48 + orbit.visualSpin * 0.24;
       ctx.strokeStyle = `rgba(125, 211, 252, ${0.24 - i * 0.018})`;
       ctx.beginPath();
       ctx.ellipse(core.x, core.y, radius, radius * (0.34 + i * 0.055), tilt, 0, Math.PI * 2);
@@ -1218,29 +1227,60 @@ function initEnergyFieldCanvas() {
       ctx.fillText("DUO CORE", core.x, core.y - 3);
       ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
       ctx.font = `500 9px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-      ctx.fillText(`v${state.version || "0.5.0"}`, core.x, core.y + 11);
+      ctx.fillText(`v${state.version || "0.5.1"}`, core.x, core.y + 11);
       ctx.textAlign = "start";
     }
   }
 
-  function projectSpatialPoint(x, y, z, fovFactor = isExpandedMap() ? 8.4 : 4.6) {
-    const expanded = isExpandedMap();
-    const yaw = orbit.yaw + (expanded ? Math.sin(core.spin * 0.12) * 0.035 : 0);
-    const cosY = Math.cos(yaw);
-    const sinY = Math.sin(yaw);
-    const x0 = x * cosY + z * sinY;
-    const z0 = -x * sinY + z * cosY;
-    const rotX = orbit.pitch + (expanded ? Math.sin(core.spin * 0.18) * 0.08 : Math.sin(core.spin * 0.36) * 0.22);
-    const cosX = Math.cos(rotX);
-    const sinX = Math.sin(rotX);
-    const y1 = y * cosX - z0 * sinX;
-    const z1 = y * sinX + z0 * cosX;
-    const fov = core.radius * fovFactor;
-    const scale = fov / (fov + z1);
+  function normalizeOrbitQuaternion() {
+    const length = Math.hypot(orbit.qx, orbit.qy, orbit.qz, orbit.qw) || 1;
+    orbit.qx /= length;
+    orbit.qy /= length;
+    orbit.qz /= length;
+    orbit.qw /= length;
+  }
+
+  function applyOrbitAxisAngle(axisX, axisY, axisZ, angle) {
+    const axisLength = Math.hypot(axisX, axisY, axisZ);
+    if (axisLength < 0.000001 || Math.abs(angle) < 0.000001) return;
+    const half = angle * 0.5;
+    const s = Math.sin(half) / axisLength;
+    const dx = axisX * s;
+    const dy = axisY * s;
+    const dz = axisZ * s;
+    const dw = Math.cos(half);
+    const qx = dw * orbit.qx + dx * orbit.qw + dy * orbit.qz - dz * orbit.qy;
+    const qy = dw * orbit.qy - dx * orbit.qz + dy * orbit.qw + dz * orbit.qx;
+    const qz = dw * orbit.qz + dx * orbit.qy - dy * orbit.qx + dz * orbit.qw;
+    const qw = dw * orbit.qw - dx * orbit.qx - dy * orbit.qy - dz * orbit.qz;
+    orbit.qx = qx;
+    orbit.qy = qy;
+    orbit.qz = qz;
+    orbit.qw = qw;
+    normalizeOrbitQuaternion();
+  }
+
+  function rotateByOrbit(x, y, z) {
+    const { qx, qy, qz, qw } = orbit;
+    const ix = qw * x + qy * z - qz * y;
+    const iy = qw * y + qz * x - qx * z;
+    const iz = qw * z + qx * y - qy * x;
+    const iw = -qx * x - qy * y - qz * z;
     return {
-      x: core.x + x0 * scale,
-      y: core.y + y1 * scale,
-      z: z1,
+      x: ix * qw + iw * -qx + iy * -qz - iz * -qy,
+      y: iy * qw + iw * -qy + iz * -qx - ix * -qz,
+      z: iz * qw + iw * -qz + ix * -qy - iy * -qx,
+    };
+  }
+
+  function projectSpatialPoint(x, y, z, fovFactor = isExpandedMap() ? 8.4 : 4.6) {
+    const rotated = rotateByOrbit(x, y, z);
+    const fov = core.radius * fovFactor;
+    const scale = fov / (fov + rotated.z);
+    return {
+      x: core.x + rotated.x * scale,
+      y: core.y + rotated.y * scale,
+      z: rotated.z,
       scale,
       depth: Math.max(0, Math.min(1, (scale - 0.78) / 0.5)),
     };
@@ -1375,7 +1415,7 @@ function initEnergyFieldCanvas() {
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.5.0"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.5.1"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
@@ -1387,7 +1427,7 @@ function initEnergyFieldCanvas() {
     if (node.key === "codex") return state.codex_status || "idle";
     if (node.key === "tasks") return state.phase || "idle";
     if (node.key === "division") return state.division_status || "stable";
-    if (node.key === "github") return state.version || "0.5.0";
+    if (node.key === "github") return state.version || "0.5.1";
     return node.metric;
   }
 
@@ -1440,7 +1480,7 @@ function initEnergyFieldCanvas() {
     for (let i = 0; i < orbitCount; i++) {
       const radius = core.radius * (0.5 + i * 0.13);
       const tilt = 0.28 + i * 0.05;
-      const angle = core.spin * (0.18 + i * 0.025) + i * 0.5 + orbit.yaw * 0.22;
+      const angle = core.spin * (0.18 + i * 0.025) + i * 0.5 + orbit.visualSpin * 0.22;
       ctx.strokeStyle = `rgba(125, 211, 252, ${0.12 - i * 0.01})`;
       ctx.lineWidth = i % 3 === 0 ? 0.9 : 0.65;
       ctx.beginPath();
@@ -1749,7 +1789,7 @@ function initEnergyFieldCanvas() {
     const protocolRows = [
       { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
       { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },
-      { key: "BUILD", value: `v${state.version || "0.5.0"}`, color: "#e1e4ed", level: 0.84 },
+      { key: "BUILD", value: `v${state.version || "0.5.1"}`, color: "#e1e4ed", level: 0.84 },
     ];
     const systemRows = [
       { key: "MEMORY", value: "linked", color: "#a78bfa", level: 0.82 },
@@ -1864,27 +1904,72 @@ function initEnergyFieldCanvas() {
     pointers.set(event.pointerId, point);
   }
 
+  function mapPointToOrbitBall(point) {
+    const radius = Math.max(120, Math.min(width, height) * 0.46);
+    let x = (point.x - core.x) / radius;
+    let y = (core.y - point.y) / radius;
+    const lengthSq = x * x + y * y;
+    if (lengthSq > 1) {
+      const inv = 1 / Math.sqrt(lengthSq);
+      x *= inv;
+      y *= inv;
+      return { x, y, z: 0 };
+    }
+    return { x, y, z: Math.sqrt(1 - lengthSq) };
+  }
+
+  function capOrbitVelocity(maxSpeed = 0.115) {
+    const speed = Math.hypot(orbit.vx, orbit.vy, orbit.vz);
+    if (speed <= maxSpeed || speed < 0.000001) return;
+    const scale = maxSpeed / speed;
+    orbit.vx *= scale;
+    orbit.vy *= scale;
+    orbit.vz *= scale;
+  }
+
   function beginOrbitDrag(point) {
     orbit.dragging = true;
     orbit.lastX = point.x;
     orbit.lastY = point.y;
+    orbit.lastBall = mapPointToOrbitBall(point);
   }
 
   function applyOrbitDrag(point) {
     if (!orbit.dragging || pointers.size > 1) {
       orbit.lastX = point.x;
       orbit.lastY = point.y;
+      orbit.lastBall = mapPointToOrbitBall(point);
       return;
     }
     const dx = point.x - orbit.lastX;
     const dy = point.y - orbit.lastY;
-    const factor = isExpandedMap() ? 0.00125 : 0.0019;
-    orbit.yawVelocity += dx * factor;
-    orbit.pitchVelocity += dy * factor;
-    orbit.yawVelocity = Math.max(-0.08, Math.min(0.08, orbit.yawVelocity));
-    orbit.pitchVelocity = Math.max(-0.055, Math.min(0.055, orbit.pitchVelocity));
+    const previous = orbit.lastBall || mapPointToOrbitBall({ x: orbit.lastX, y: orbit.lastY });
+    const next = mapPointToOrbitBall(point);
+    const axisX = previous.y * next.z - previous.z * next.y;
+    const axisY = previous.z * next.x - previous.x * next.z;
+    const axisZ = previous.x * next.y - previous.y * next.x;
+    const axisLength = Math.hypot(axisX, axisY, axisZ);
+    const dot = Math.max(-1, Math.min(1, previous.x * next.x + previous.y * next.y + previous.z * next.z));
+    const fallbackSpeed = Math.hypot(dx, dy);
+    if (axisLength > 0.00001) {
+      const angle = Math.min(0.18, Math.atan2(axisLength, dot) * (isExpandedMap() ? 1.18 : 1.34));
+      applyOrbitAxisAngle(axisX, axisY, axisZ, angle);
+      const impulse = Math.min(0.105, angle * 0.72);
+      orbit.vx = orbit.vx * 0.28 + (axisX / axisLength) * impulse;
+      orbit.vy = orbit.vy * 0.28 + (axisY / axisLength) * impulse;
+      orbit.vz = orbit.vz * 0.28 + (axisZ / axisLength) * impulse;
+      orbit.visualSpin += (dx * 0.0009 + axisZ * 0.04);
+    } else if (fallbackSpeed > 0.1) {
+      const factor = isExpandedMap() ? 0.0014 : 0.002;
+      orbit.vx = orbit.vx * 0.35 + dy * factor;
+      orbit.vy = orbit.vy * 0.35 + dx * factor;
+      orbit.visualSpin += dx * factor * 0.8;
+      capOrbitVelocity();
+    }
+    capOrbitVelocity();
     orbit.lastX = point.x;
     orbit.lastY = point.y;
+    orbit.lastBall = next;
     targetEnergy = Math.max(targetEnergy, 1.12);
   }
 
@@ -2100,18 +2185,21 @@ function initEnergyFieldCanvas() {
     pointers.delete(event.pointerId);
     pointer.down = pointers.size > 0;
     if (!pointer.down) orbit.dragging = false;
+    if (!pointer.down) orbit.lastBall = null;
     lastPinchDistance = null;
   }, { passive: true });
   window.addEventListener("pointercancel", (event) => {
     pointers.delete(event.pointerId);
     pointer.down = pointers.size > 0;
     if (!pointer.down) orbit.dragging = false;
+    if (!pointer.down) orbit.lastBall = null;
     lastPinchDistance = null;
   }, { passive: true });
   host.addEventListener("pointerleave", (event) => {
     if (!pointer.down) {
       pointers.delete(event.pointerId);
       orbit.dragging = false;
+      orbit.lastBall = null;
       lastPinchDistance = null;
     }
   }, { passive: true });
