@@ -3,15 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Duo Hub — 三AI协作中心</title>
+<title>Duo Hub — Codex 主管调度看板</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/supervisor_status.css">
 </head>
 <body>
 
 <header class="topbar">
   <div class="topbar-left">
     <span class="logo">⚡ Duo Hub</span>
-    <span class="subtitle">三AI协作中心</span>
+    <span class="subtitle">Codex 主管调度看板</span>
   </div>
   <div class="topbar-right">
     <span id="gw-ccmr" class="gw-indicator" title="ccmr 网关">🔵 ccmr</span>
@@ -42,6 +43,11 @@
   </div>
 </section>
 
+<section class="supervisor-status-section" aria-label="三方分工状态">
+  <div class="section-label">🧭 三方分工状态</div>
+  <div id="supervisor-status-root"></div>
+</section>
+
 <div class="main-grid">
 
   <!-- Claude 面板 -->
@@ -50,13 +56,14 @@
       <span class="ai-icon">🔵</span>
       <span class="ai-name">Claude Code</span>
       <select class="model-select" id="claude-model" title="切换模型">
-        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
-        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
-        <option value="kimi-k2.6">Kimi K2.6</option>
-        <option value="minimax-m3">MiniMax M3</option>
-        <option value="qwen3.5-plus">Qwen3.5 Plus</option>
-        <option value="glm-5.1">GLM-5.1</option>
-        <option value="step-3.7-flash">Step 3.7 Flash</option>
+        <option value="ikun-gpt-gpt-5-5">Claude 签字席位：IKun GPT 5.5</option>
+        <option value="ikun-gpt-gpt-5-4">Claude 签字席位：IKun GPT 5.4</option>
+        <option value="ikun-claude-claude-sonnet-4-6">IKun Claude Sonnet 4.6（待通道恢复）</option>
+        <option value="ikun-claude-claude-opus-4-8">IKun Claude Opus 4.8（待通道恢复）</option>
+        <option value="ikun-claude-claude-opus-4-7">IKun Claude Opus 4.7（待通道恢复）</option>
+        <option value="ikun-claude-claude-opus-4-6">IKun Claude Opus 4.6（待通道恢复）</option>
+        <option value="ikun-claude-claude-opus-4-5">IKun Claude Opus 4.5（待通道恢复）</option>
+        <option value="ikun-claude-claude-haiku-4-5">IKun Claude Haiku 4.5（待通道恢复）</option>
       </select>
       <span class="ai-status" id="claude-status-badge" data-status="idle">空闲</span>
     </div>
@@ -74,11 +81,16 @@
       <span class="ai-icon">🦞</span>
       <span class="ai-name">龙虾</span>
       <select class="model-select lobster-select" id="lobster-model" title="切换模型">
-        <option value="">默认 (GPT-5.5)</option>
-        <option value="deepseek/deepseek-v4-flash">DeepSeek V4 Flash ⚡便宜</option>
-        <option value="dmxapi/gpt-4.1-mini">GPT 4.1 Mini</option>
+        <option value="deepseek/deepseek-v4-flash">DeepSeek V4 Flash</option>
+        <option value="deepseek/deepseek-v4-pro">DeepSeek V4 Pro</option>
+        <option value="deepseek/deepseek-chat">DeepSeek Chat</option>
+        <option value="ikuncode/gpt-5.5">IKun GPT 5.5</option>
         <option value="bailian/qwen-coder-plus">Qwen Coder Plus</option>
         <option value="bailian/qwen-plus">Qwen Plus</option>
+        <option value="ikuncode/claude-sonnet-4-6">IKun Claude Sonnet 4.6</option>
+        <option value="ikuncode/claude-opus-4-7">IKun Claude Opus 4.7</option>
+        <option value="ikuncode/claude-opus-4-8">IKun Claude Opus 4.8</option>
+        <option value="ikuncode/claude-haiku-4-5-20251001">IKun Claude Haiku 4.5</option>
       </select>
       <span class="ai-status" id="lobster-status-badge" data-status="idle">空闲</span>
     </div>
@@ -114,9 +126,9 @@
 
 <!-- 对话历史 -->
 <section class="chat-section">
-  <div class="section-label">📜 对话记录</div>
+  <div class="section-label">📜 Codex 主管三方分工记录</div>
   <div class="chat-messages" id="chat-messages">
-    <div class="chat-empty">输入你的需求，三个 AI 将同时响应…</div>
+    <div class="chat-empty">主对话在 Codex；这里展示 Codex 派发 Claude / 龙虾 / Codex 三方分工的过程…</div>
   </div>
 </section>
 
@@ -141,24 +153,32 @@
   <div class="input-row">
     <textarea
       id="task-input"
-      placeholder="📝 输入你的需求… (Ctrl+Enter 发送)"
+      placeholder="📝 可手动记录/测试；三方分工由 Codex 主管派发… (Ctrl+Enter)"
       rows="2"
     ></textarea>
     <div class="btn-group">
       <label class="checkbox-label" title="勾选后三个AI会自动协商分工">
         <input type="checkbox" id="chk-division"> 🤝 需要分工
       </label>
+      <label class="checkbox-label" title="勾选后才会实际调用 Claude、龙虾和 Codex，可能消耗 API 额度">
+        <input type="checkbox" id="chk-paid-agents"> 💰 启用三方调用
+      </label>
       <button class="btn btn-primary" id="btn-send" title="发送任务 (Ctrl+Enter)">
-        🚀 发送
+        🚀 手动发送
       </button>
     </div>
   </div>
   <div class="action-row">
-    <button class="btn btn-sm btn-stop" id="btn-stop">⏹ 重置会话</button>
+    <div class="action-left">
+      <button class="btn btn-sm btn-loop" id="btn-loop-scan" title="不调用模型，只扫描本地 Loop 状态">↻ Loop 扫描</button>
+      <button class="btn btn-sm btn-stop" id="btn-stop">⏹ 重置会话</button>
+      <span class="loop-status" id="loop-status">Loop 未扫描</span>
+    </div>
     <span class="phase-indicator" id="phase-text">就绪</span>
   </div>
 </footer>
 
+<script src="/supervisor_status.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

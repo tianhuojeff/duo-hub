@@ -7,13 +7,17 @@ Duo Hub — 三AI协作中心
 import http.server
 import json
 import os
+import re
+import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
+import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -24,9 +28,38 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
-APP_VERSION = "0.5.1"
+FAST_AI_TIMEOUT = int(os.environ.get("DUO_FAST_AI_TIMEOUT", "90"))
+APP_VERSION = "0.5.16"
 GATEWAY_CACHE_TTL = int(os.environ.get("DUO_GATEWAY_CACHE_TTL", "30"))
 GATEWAY_CHECK_TIMEOUT = float(os.environ.get("DUO_GATEWAY_CHECK_TIMEOUT", "1"))
+REQUEST_BODY_TIMEOUT = float(os.environ.get("DUO_REQUEST_BODY_TIMEOUT", "5"))
+AGENT_CONTEXT_MESSAGES = int(os.environ.get("DUO_AGENT_CONTEXT_MESSAGES", "4"))
+AGENT_CONTEXT_CHARS = int(os.environ.get("DUO_AGENT_CONTEXT_CHARS", "1000"))
+LOCAL_NO_PROXY = ("127.0.0.1", "localhost", "::1")
+
+
+def _merge_csv_env(existing, additions):
+    parts = []
+    seen = set()
+    for item in (existing or "").replace(";", ",").split(","):
+        value = item.strip()
+        if value and value.lower() not in seen:
+            parts.append(value)
+            seen.add(value.lower())
+    for value in additions:
+        if value.lower() not in seen:
+            parts.append(value)
+            seen.add(value.lower())
+    return ",".join(parts)
+
+
+def _ensure_local_no_proxy(env):
+    merged = _merge_csv_env(env.get("NO_PROXY") or env.get("no_proxy") or "", LOCAL_NO_PROXY)
+    env["NO_PROXY"] = merged
+    env["no_proxy"] = merged
+
+
+_ensure_local_no_proxy(os.environ)
 
 def _load_config():
     """加载配置，优先环境变量，其次 config.local.json/config.json，最后自动检测"""
@@ -60,7 +93,7 @@ def _load_config():
     WEB_DIR = Path(__file__).parent / "web"
 
     # 网关端口
-    CCMR_PORT = int(os.environ.get("DUO_CCMR_PORT", config.get("ccmr_port", "8080")))
+    CCMR_PORT = int(os.environ.get("DUO_CCMR_PORT", config.get("ccmr_port", "18080")))
     OPENCLAW_PORT = int(os.environ.get("DUO_OPENCLAW_PORT", config.get("openclaw_port", "18789")))
 
     return PROTOCOL_DIR, CLAUDE_WORKSPACE, CODEX_WORKSPACE, WEB_DIR, CCMR_PORT, OPENCLAW_PORT
@@ -73,11 +106,14 @@ OUTBOX_LOBSTER = PROTOCOL_DIR / "outbox" / "lobster.md"
 OUTBOX_CODEX = PROTOCOL_DIR / "outbox" / "codex.md"
 SESSION_FILE = PROTOCOL_DIR / "session.json"
 CHAT_FILE = PROTOCOL_DIR / "chat.json"
+LOOP_STATE_FILE = PROTOCOL_DIR / "loop_state.json"
+LOOP_REPORT_FILE = PROTOCOL_DIR / "loop_report.md"
 
 AI_ORDER = ("claude", "lobster", "codex")
+SUPERVISOR_TARGETS = AI_ORDER
 TERMINAL_STATUSES = ("done", "timeout", "error")
 AI_LABELS = {
-    "user": "天火大人",
+    "user": "用户",
     "claude": "Claude Code",
     "lobster": "龙虾 (OpenClaw)",
     "codex": "Codex",
@@ -89,16 +125,70 @@ OUTBOX_FILES = {
     "codex": OUTBOX_CODEX,
 }
 
+DEFAULT_LOBSTER_MODEL = "deepseek/deepseek-v4-flash"
+LOBSTER_MODEL_ALIASES = {
+    "": DEFAULT_LOBSTER_MODEL,
+    "dmxapi/gpt-4.1-mini": DEFAULT_LOBSTER_MODEL,
+    "dmxapi/gpt-4.1-mini-2025-04-14": DEFAULT_LOBSTER_MODEL,
+    "gpt-4.1-mini": DEFAULT_LOBSTER_MODEL,
+    "gpt-5.5": DEFAULT_LOBSTER_MODEL,
+}
+LOBSTER_FAST_CCMR_MODELS = {
+    "ikuncode/claude-sonnet-4-6": "ikun-gpt-gpt-5-5",
+    "ikuncode/claude-opus-4-8": "ikun-gpt-gpt-5-5",
+    "ikuncode/claude-opus-4-7": "ikun-gpt-gpt-5-5",
+    "ikuncode/claude-opus-4-6": "ikun-gpt-gpt-5-5",
+    "ikuncode/claude-haiku-4-5-20251001": "ikun-gpt-gpt-5-5",
+}
+DEFAULT_CLAUDE_MODEL = "ikun-claude-claude-sonnet-4-6"
+CLAUDE_REVIEW_FALLBACK_MODELS = (
+    "ikun-gpt-gpt-5-5",
+    "ikun-gpt-gpt-5-4",
+)
+CLAUDE_MODEL_ALIASES = {
+    "": DEFAULT_CLAUDE_MODEL,
+    "deepseek-v4-pro": "ikun-gpt-gpt-5-5",
+    "deepseek-v4-flash": "ikun-gpt-gpt-5-5",
+    "kimi-k2.6": "ikun-gpt-gpt-5-5",
+    "minimax-m3": "ikun-gpt-gpt-5-5",
+    "qwen3.5-plus": "ikun-gpt-gpt-5-5",
+    "glm-5.1": "ikun-gpt-gpt-5-5",
+    "step-3.7-flash": "ikun-gpt-gpt-5-5",
+    "claude": DEFAULT_CLAUDE_MODEL,
+    "sonnet": DEFAULT_CLAUDE_MODEL,
+    "sonnet-4-6": DEFAULT_CLAUDE_MODEL,
+    "claude-sonnet-4-6": DEFAULT_CLAUDE_MODEL,
+    "ikuncode-claude-sonnet-4-6": DEFAULT_CLAUDE_MODEL,
+    "ikun-claude-claude-sonnet-4-6": DEFAULT_CLAUDE_MODEL,
+    "ikun-claude-claude-opus-4-8": DEFAULT_CLAUDE_MODEL,
+    "ikun-claude-claude-opus-4-7": DEFAULT_CLAUDE_MODEL,
+    "ikun-claude-claude-opus-4-6": DEFAULT_CLAUDE_MODEL,
+    "ikun-claude-claude-opus-4-5": DEFAULT_CLAUDE_MODEL,
+    "ikun-claude-claude-haiku-4-5": DEFAULT_CLAUDE_MODEL,
+    "ikuncode-claude-opus-4-8": DEFAULT_CLAUDE_MODEL,
+    "ikuncode-claude-opus-4-7": DEFAULT_CLAUDE_MODEL,
+    "ikuncode-claude-opus-4-6": DEFAULT_CLAUDE_MODEL,
+    "ikuncode-claude-opus-4-5-20251101": DEFAULT_CLAUDE_MODEL,
+    "ikuncode-claude-haiku-4-5-20251001": DEFAULT_CLAUDE_MODEL,
+    "ikuncode-claude-sonnet-4-5-20250929": DEFAULT_CLAUDE_MODEL,
+    "ikuncode-gpt-5.5": "ikun-gpt-gpt-5-5",
+    "gpt-5.5": "ikun-gpt-gpt-5-5",
+    "ikuncode-gpt-5.4": "ikun-gpt-gpt-5-4",
+    "gpt-5.4": "ikun-gpt-gpt-5-4",
+}
+
 
 def _find_tool(name, env_var, known_paths):
     """查找可执行文件：环境变量 > PATH 搜索 > 已知路径"""
     env_val = os.environ.get(env_var, "")
     if env_val and Path(env_val).exists():
         return env_val
+    path_match = shutil.which(name)
+    if path_match:
+        return path_match
     for p in known_paths:
         if Path(p).exists():
             return p
-    # 最后尝试 PATH 中的命令
     return name
 
 
@@ -106,23 +196,32 @@ def _find_tool(name, env_var, known_paths):
 _ccmr_candidates = [
     str(Path.home() / "AppData" / "Roaming" / "npm" / "node_modules" / "claude-code-model-router" / "dist" / "cli.js"),
 ]
-# 也尝试找 claude-code-model-router 的安装位置
-import glob as _glob
-for _base in [str(Path.home() / "AppData" / "Roaming" / "npm" / "node_modules"),
-              str(Path.home() / "AppData" / "Local" / "pnpm" / "global")]:
-    _matches = _glob.glob(f"{_base}/**/claude-code-model-router/dist/cli.js", recursive=True)
-    _ccmr_candidates.extend(_matches)
+for _base in (
+    Path.home() / "AppData" / "Local" / "pnpm" / "global",
+    Path.home() / "AppData" / "Local" / "pnpm" / "global" / "5",
+):
+    _ccmr_candidates.append(str(_base / "node_modules" / "claude-code-model-router" / "dist" / "cli.js"))
 
 NODE_CMD = "node"
 CCMR_JS = _find_tool("ccmr_js", "DUO_CCMR_JS", _ccmr_candidates)
+
+# 自动检测 Claude CLI。Windows 后台进程优先使用 claude.cmd，避免 npm shim 解析问题。
+_claude_candidates = [
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "claude.cmd"),
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "claude.exe"),
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "claude.ps1"),
+]
+CLAUDE_CMD = _find_tool("claude.cmd", "DUO_CLAUDE_CMD", _claude_candidates)
 
 # 自动检测 openclaw
 _oc_candidates = [
     str(Path.home() / "AppData" / "Local" / "pnpm" / "openclaw.cmd"),
 ]
-for _base in [str(Path.home() / "AppData" / "Local" / "pnpm" / "global")]:
-    _matches = _glob.glob(f"{_base}/**/openclaw/openclaw.mjs", recursive=True)
-    _oc_candidates.extend(_matches)
+for _base in (
+    Path.home() / "AppData" / "Local" / "pnpm" / "global",
+    Path.home() / "AppData" / "Local" / "pnpm" / "global" / "5",
+):
+    _oc_candidates.append(str(_base / "node_modules" / "openclaw" / "openclaw.mjs"))
 OPENCLAW_CMD = _find_tool("openclaw", "DUO_OPENCLAW_CMD", _oc_candidates)
 
 # 自动检测 Codex。Windows 后台进程优先使用 codex.cmd，避免误执行无扩展名 npm shim。
@@ -134,28 +233,187 @@ _codex_candidates = [
 CODEX_CMD = _find_tool("codex.cmd", "DUO_CODEX_CMD", _codex_candidates)
 
 
+def _cmd_parts(cmd):
+    path = Path(cmd)
+    if path.suffix.lower() == ".ps1":
+        return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(path)]
+    if path.suffix.lower() in (".cmd", ".bat"):
+        return ["cmd.exe", "/c", str(path)]
+    return [str(path)]
+
+
+def _claude_cmd_parts():
+    return _cmd_parts(CLAUDE_CMD)
+
+
 def _codex_cmd_parts():
     path = Path(CODEX_CMD)
     if path.suffix.lower() == ".ps1":
         return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(path)]
     return [str(path)]
 
+
+def _openclaw_cmd_parts():
+    path = Path(OPENCLAW_CMD)
+    if path.suffix.lower() == ".ps1":
+        return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(path)]
+    if path.suffix.lower() in (".cmd", ".bat"):
+        return ["cmd.exe", "/c", str(path)]
+    if path.suffix.lower() == ".mjs":
+        return [NODE_CMD, str(path)]
+    return [str(path)]
+
 # 构建子进程环境
 _ENV = os.environ.copy()
+_ensure_local_no_proxy(_ENV)
 _npm_bin = str(Path.home() / "AppData" / "Roaming" / "npm")
 _pnpm_bin = str(Path.home() / "AppData" / "Local" / "pnpm")
 _ENV["PATH"] = os.pathsep.join([_npm_bin, _pnpm_bin, _ENV.get("PATH", "")])
 
 # OpenClaw NODE_PATH（自动检测）
 _oc_node_paths = []
-for _base in [str(Path.home() / "AppData" / "Local" / "pnpm" / "global")]:
-    _matches = _glob.glob(f"{_base}/**/openclaw/node_modules", recursive=True)
-    for _m in _matches:
-        _oc_node_paths.append(_m)
-        _oc_node_paths.append(str(Path(_m).parent))
+for _base in (
+    Path.home() / "AppData" / "Local" / "pnpm" / "global",
+    Path.home() / "AppData" / "Local" / "pnpm" / "global" / "5",
+):
+    _m = _base / "node_modules" / "openclaw" / "node_modules"
+    if _m.exists():
+        _oc_node_paths.append(str(_m))
+        _oc_node_paths.append(str(_m.parent))
 if _oc_node_paths:
     _oc_path = os.pathsep.join(_oc_node_paths)
     _ENV["NODE_PATH"] = _oc_path + os.pathsep + _ENV.get("NODE_PATH", "")
+
+
+def _claude_gateway_env(model_id):
+    env = _ENV.copy()
+    gateway_url = f"http://127.0.0.1:{CCMR_PORT}"
+    env.setdefault("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude-gateway"))
+    env["ANTHROPIC_BASE_URL"] = gateway_url
+    env["ANTHROPIC_AUTH_TOKEN"] = env.get("CCMR_AUTH_TOKEN", "ccmr-local-gateway")
+    env["ANTHROPIC_MODEL"] = model_id
+    env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = model_id
+    env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = model_id
+    env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = model_id
+    env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
+    env.setdefault("NODE_NO_WARNINGS", "1")
+    env.setdefault("LANG", "zh_CN.UTF-8")
+    env.setdefault("LC_ALL", "zh_CN.UTF-8")
+    return env
+
+
+def _truncate_text(text, max_chars=AGENT_CONTEXT_CHARS):
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n...[已截断]"
+
+
+def _extract_anthropic_text(data):
+    for key in ("text", "reply", "output_text"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] or {}
+        if isinstance(first, dict):
+            message = first.get("message") or {}
+            content = message.get("content") if isinstance(message, dict) else ""
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    content = data.get("content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text") or item.get("content") or ""
+                if text:
+                    parts.append(str(text))
+            elif isinstance(item, str):
+                parts.append(item)
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _post_ccmr_message(prompt, model_id, max_tokens=1200, timeout=FAST_AI_TIMEOUT):
+    payload = {
+        "model": model_id,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{CCMR_PORT}/v1/messages",
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {_ENV.get('CCMR_AUTH_TOKEN', 'ccmr-local-gateway')}",
+        },
+        method="POST",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"ccmr HTTP {e.code}: {body[:800]}") from e
+    parsed = json.loads(raw)
+    text = _extract_anthropic_text(parsed)
+    if text:
+        return text
+    return raw.strip()
+
+
+def _is_ccmr_channel_unavailable(error):
+    text = str(error)
+    return (
+        "No available channel for model" in text
+        or "无可用" in text
+        or "no available channel" in text.lower()
+    )
+
+
+def _post_claude_review_message(prompt, model_id):
+    try:
+        return _post_ccmr_message(prompt, model_id)
+    except Exception as e:
+        if not _is_ccmr_channel_unavailable(e):
+            raise
+        last_error = e
+        for fallback_model in CLAUDE_REVIEW_FALLBACK_MODELS:
+            if fallback_model == model_id:
+                continue
+            try:
+                fallback_output = _post_ccmr_message(prompt, fallback_model)
+                return (
+                    "[首选模型通道暂不可用，已临时切到 Duo Hub 配置的备用模型；"
+                    "本回包保留实际底层模型来源，供调用方审计。]\n\n"
+                    f"底层签字模型：{fallback_model}\n"
+                    f"原 IKun Claude 通道错误：{str(e)[:500]}\n\n"
+                    f"{fallback_output}"
+                )
+            except Exception as fallback_error:
+                last_error = fallback_error
+        raise last_error
+
+
+def _lobster_fast_ccmr_model(model_id):
+    return LOBSTER_FAST_CCMR_MODELS.get((model_id or "").strip())
+
+
+def _is_heartbeat_task(task_text):
+    text = (task_text or "").strip().lower()
+    compact = "".join(text.split())
+    heartbeat = {
+        "来", "说话", "在吗", "ping", "pong", "hello", "hi",
+        "检查连接", "连接检查", "检查各自连接", "现在检查各自连接",
+        "测试连接", "连接测试", "谁能说话",
+    }
+    return compact in heartbeat
 
 # ============================================================
 # DuoHub — 协议和状态管理
@@ -164,6 +422,7 @@ class DuoHub:
     def __init__(self):
         self.lock = threading.Lock()
         self._gateway_lock = threading.Lock()
+        self._collect_lock = threading.Lock()
         self._gateway_cache = None
         self._gateway_cache_at = 0
         self._ensure_dirs()
@@ -174,6 +433,214 @@ class DuoHub:
         PROTOCOL_DIR.mkdir(parents=True, exist_ok=True)
         (PROTOCOL_DIR / "inbox").mkdir(exist_ok=True)
         (PROTOCOL_DIR / "outbox").mkdir(exist_ok=True)
+
+    # ---- Loop state ----
+    def _default_loop_state(self):
+        return {
+            "schema_version": 1,
+            "status": "not_scanned",
+            "updated_at": None,
+            "source": "",
+            "summary": "尚未扫描",
+            "findings": [],
+            "next_actions": ["点击 Loop 扫描，先做一次本地状态检查。"],
+            "report_path": str(LOOP_REPORT_FILE),
+        }
+
+    def get_loop_state(self):
+        if not LOOP_STATE_FILE.exists():
+            return self._default_loop_state()
+        try:
+            with open(LOOP_STATE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            default = self._default_loop_state()
+            default.update(state if isinstance(state, dict) else {})
+            return default
+        except Exception as e:
+            state = self._default_loop_state()
+            state["status"] = "error"
+            state["summary"] = f"Loop 状态读取失败: {e}"
+            state["findings"] = [{
+                "severity": "action",
+                "area": "loop_state",
+                "message": "loop_state.json 读取失败",
+                "next": "检查协议目录权限或删除损坏的 loop_state.json 后重新扫描。",
+            }]
+            return state
+
+    def _outbox_snapshot(self):
+        snapshot = {}
+        for ai in AI_ORDER:
+            path = self.outbox_for(ai)
+            item = {"path": str(path), "exists": path.exists(), "bytes": 0, "updated_at": None}
+            if path.exists():
+                try:
+                    stat = path.stat()
+                    item["bytes"] = stat.st_size
+                    item["updated_at"] = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+                except Exception:
+                    pass
+            snapshot[ai] = item
+        return snapshot
+
+    def _repo_snapshot(self):
+        repo = Path(__file__).parent
+        result = {"path": str(repo), "available": False, "dirty": None, "changed": []}
+        try:
+            proc = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=str(repo),
+                capture_output=True,
+                text=True,
+                timeout=5,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except Exception as e:
+            result["error"] = str(e)
+            return result
+        result["available"] = proc.returncode == 0
+        if proc.returncode != 0:
+            result["error"] = (proc.stderr or proc.stdout or "").strip()[:500]
+            return result
+        changed = [line for line in (proc.stdout or "").splitlines() if line.strip()]
+        result["dirty"] = bool(changed)
+        result["changed"] = changed[:20]
+        result["changed_count"] = len(changed)
+        return result
+
+    def _write_loop_report(self, state):
+        lines = [
+            "# Duo Hub Loop Scan",
+            "",
+            f"- updated_at: {state.get('updated_at')}",
+            f"- status: {state.get('status')}",
+            f"- phase: {state.get('phase')}",
+            f"- active_task_id: {state.get('active_task_id') or ''}",
+            "",
+            "## Gateways",
+        ]
+        for name, online in (state.get("gateways") or {}).items():
+            lines.append(f"- {name}: {'online' if online else 'offline'}")
+        lines.extend(["", "## Agents"])
+        for name, status in (state.get("agent_statuses") or {}).items():
+            lines.append(f"- {name}: {status}")
+        lines.extend(["", "## Findings"])
+        findings = state.get("findings") or []
+        if findings:
+            for item in findings:
+                lines.append(f"- [{item.get('severity')}] {item.get('area')}: {item.get('message')} Next: {item.get('next')}")
+        else:
+            lines.append("- no findings")
+        lines.extend(["", "## Next Actions"])
+        for action in state.get("next_actions") or []:
+            lines.append(f"- {action}")
+        lines.append("")
+        with open(LOOP_REPORT_FILE, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+
+    def run_loop_scan(self, source="manual"):
+        """不调用模型的最小 Loop：发现状态、验证边界、写入下一步。"""
+        self.check_and_collect_results()
+        gateways = self.check_gateways()
+        phase = self.session.get("phase", "idle")
+        agent_statuses = {ai: self.session.get(f"{ai}_status", "idle") for ai in AI_ORDER}
+        findings = []
+        next_actions = []
+
+        for name, online in gateways.items():
+            if not online:
+                findings.append({
+                    "severity": "warn",
+                    "area": "gateway",
+                    "message": f"{name} 当前离线",
+                    "next": "使用一键启动器重启 Duo Hub/ccmr/OpenClaw 网关，再重新扫描。",
+                })
+
+        if phase in ("ai_working", "negotiating", "executing"):
+            next_actions.append("当前有三方任务在运行，先等待完成或用“重置会话”停止后再推进下一轮。")
+        elif phase == "pending_confirmation":
+            findings.append({
+                "severity": "action",
+                "area": "division",
+                "message": "分工已达成一致，正在等待用户确认",
+                "next": "确认执行、输入修改意见，或取消当前分工。",
+            })
+        elif phase == "awaiting_feedback":
+            findings.append({
+                "severity": "action",
+                "area": "division",
+                "message": "三方分工存在分歧，已暂停自动协商",
+                "next": "给出裁决意见，或限制协商轮次后重新触发协商。",
+            })
+        elif phase in ("idle", "awaiting_user", "done"):
+            next_actions.append("系统空闲，可提交任务；默认不会调用付费 Agent，除非勾选启用三方调用。")
+
+        for ai, status in agent_statuses.items():
+            if status == "working":
+                started = self.session.get(f"_{ai}_started", 0)
+                age = time.time() - started if started else 0
+                if age > AI_TIMEOUT:
+                    findings.append({
+                        "severity": "action",
+                        "area": ai,
+                        "message": f"{AI_LABELS[ai]} 已运行超过超时时间",
+                        "next": "刷新状态收集超时结果，必要时重置会话。",
+                    })
+            elif status in ("timeout", "error"):
+                findings.append({
+                    "severity": "warn",
+                    "area": ai,
+                    "message": f"{AI_LABELS[ai]} 状态为 {status}",
+                    "next": "查看对应面板输出，必要时切换模型或检查网关。",
+                })
+
+        repo = self._repo_snapshot()
+        if repo.get("dirty"):
+            findings.append({
+                "severity": "info",
+                "area": "repo",
+                "message": f"当前仓库有 {repo.get('changed_count', 0)} 个未提交变更",
+                "next": "提交前先跑验证，并决定 models.yaml 是否纳入仓库。",
+            })
+
+        if not findings:
+            status = "ready"
+            summary = "Loop 扫描通过：网关和会话状态未发现阻塞项。"
+        elif any(item["severity"] == "action" for item in findings):
+            status = "blocked"
+            summary = "Loop 扫描发现需要用户裁决或人工处理的阻塞项。"
+        else:
+            status = "watching"
+            summary = "Loop 扫描发现可观察风险，但不阻塞继续工作。"
+
+        if not next_actions:
+            next_actions = [item["next"] for item in findings[:3]] or ["继续保持当前状态。"]
+
+        state = {
+            "schema_version": 1,
+            "status": status,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "source": source,
+            "summary": summary,
+            "session_id": self.session.get("session_id"),
+            "phase": phase,
+            "active_task_id": self.session.get("active_task_id"),
+            "gateways": gateways,
+            "agent_statuses": agent_statuses,
+            "outboxes": self._outbox_snapshot(),
+            "repo": repo,
+            "findings": findings,
+            "next_actions": next_actions,
+            "report_path": str(LOOP_REPORT_FILE),
+        }
+
+        tmp = LOOP_STATE_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        tmp.replace(LOOP_STATE_FILE)
+        self._write_loop_report(state)
+        return state
 
     def _init_session(self):
         if SESSION_FILE.exists():
@@ -195,8 +662,8 @@ class DuoHub:
             "claude_status": "idle",
             "lobster_status": "idle",
             "codex_status": "idle",
-            "claude_model": "deepseek-v4-pro",
-            "lobster_model": "deepseek/deepseek-v4-flash",  # DeepSeek 比 GPT 快且便宜
+            "claude_model": DEFAULT_CLAUDE_MODEL,
+            "lobster_model": DEFAULT_LOBSTER_MODEL,
             "codex_model": "",
             "active_task_id": None,
             "created_at": datetime.now().isoformat(),
@@ -208,11 +675,23 @@ class DuoHub:
         self.session.setdefault("round", 0)
         self.session.setdefault("active_task_id", None)
         self.session.setdefault("created_at", datetime.now().isoformat())
-        self.session.setdefault("claude_model", "deepseek-v4-pro")
-        self.session.setdefault("lobster_model", "deepseek/deepseek-v4-flash")
+        self.session.setdefault("claude_model", DEFAULT_CLAUDE_MODEL)
+        self.session["claude_model"] = self._normalize_claude_model_id(self.session.get("claude_model"))
+        self.session.setdefault("lobster_model", DEFAULT_LOBSTER_MODEL)
+        self.session["lobster_model"] = self._normalize_lobster_model_id(self.session.get("lobster_model"))
         self.session.setdefault("codex_model", "")
         for ai in AI_ORDER:
             self.session.setdefault(f"{ai}_status", "idle")
+
+    @staticmethod
+    def _normalize_lobster_model_id(model):
+        model = (model or "").strip()
+        return LOBSTER_MODEL_ALIASES.get(model, model or DEFAULT_LOBSTER_MODEL)
+
+    @staticmethod
+    def _normalize_claude_model_id(model):
+        model = (model or "").strip()
+        return CLAUDE_MODEL_ALIASES.get(model, model or DEFAULT_CLAUDE_MODEL)
 
     def _init_chat(self):
         if CHAT_FILE.exists():
@@ -223,7 +702,37 @@ class DuoHub:
                 self.chat = {"messages": []}
         else:
             self.chat = {"messages": []}
+        self._normalize_chat()
         self._save_chat()
+
+    def _normalize_chat(self):
+        """Keep chat storage tolerant to manual protocol edits."""
+        if isinstance(self.chat, dict):
+            messages = self.chat.get("messages")
+            self.chat["messages"] = messages if isinstance(messages, list) else []
+            return
+
+        if isinstance(self.chat, list) and self.chat:
+            first = self.chat[0]
+            if isinstance(first, dict) and isinstance(first.get("messages"), list):
+                messages = list(first["messages"])
+                max_id = 0
+                for msg in messages:
+                    msg_id = str(msg.get("id", ""))
+                    match = re.match(r"^msg_(\d+)$", msg_id)
+                    if match:
+                        max_id = max(max_id, int(match.group(1)))
+                for item in self.chat[1:]:
+                    if not isinstance(item, dict):
+                        continue
+                    max_id += 1
+                    item.setdefault("id", f"msg_{max_id:04d}")
+                    item.setdefault("round", self.session.get("round", 0))
+                    messages.append(item)
+                self.chat = {"messages": messages}
+                return
+
+        self.chat = {"messages": []}
 
     def _save_session(self):
         with self.lock:
@@ -311,18 +820,18 @@ class DuoHub:
 
     # ---- 协议 I/O ----
     def write_inbox(self, task_text):
-        recent = self.get_recent_messages(10)
+        recent = self.get_recent_messages(AGENT_CONTEXT_MESSAGES)
         ctx = ""
         if recent:
             ctx = "\n\n## 对话上下文\n\n"
             for m in recent:
                 role_label = AI_LABELS.get(m["role"], m["role"])
-                ctx += f"**{role_label}**: {m['content']}\n\n"
+                ctx += f"**{role_label}**: {_truncate_text(m['content'])}\n\n"
 
         header = (
             "# Duo Hub 协作任务\n\n"
             "你正在三AI协作中心工作，搭档是 Claude Code、OpenClaw「龙虾」和 Codex。"
-            "天火大人通过 Duo Hub 同时与你们三个交互。\n\n"
+            "用户通过 Duo Hub 同时与你们三个交互。\n\n"
             "工作规则：\n"
             "1. 分析任务需求，给出你的方案\n"
             "2. 标注你擅长的部分和需要对方配合的部分\n"
@@ -397,24 +906,32 @@ class DuoHub:
                     "你在三AI协作中心工作，搭档是 OpenClaw「龙虾」和 Codex。\n"
                     "分析任务需求并给出方案。回复使用中文。\n"
                 )
-                recent = self.get_recent_messages(10)
-                history = "\n\n".join([f"[{m['role']}]: {m['content']}" for m in recent])
+                recent = self.get_recent_messages(AGENT_CONTEXT_MESSAGES)
+                history = "\n\n".join([f"[{m['role']}]: {_truncate_text(m['content'])}" for m in recent])
                 short_prompt = f"对话历史：\n{history}\n\n---\n最新任务：{task_text}"
 
-            # 将完整提示词写入文件，通过 stdin 传给 ccmr（避开 Windows 命令行 8191 字符限制）
+            # 将完整提示词写入文件，通过 stdin 传给 Claude CLI（避开 Windows 命令行 8191 字符限制）
             full_prompt = f"{hub_prompt}\n\n---\n\n{short_prompt}"
+            model_arg = self._normalize_claude_model_id(model or self.session.get("claude_model"))
+
+            if mode != "execute":
+                output = _post_claude_review_message(full_prompt, model_arg)
+                with open(OUTBOX_CLAUDE, "w", encoding="utf-8") as f:
+                    f.write(output)
+                self.session["claude_status"] = "done"
+                self._save_session()
+                return
+
             import uuid
             prompt_file = PROTOCOL_DIR / "inbox" / f"_claude_stdin_{uuid.uuid4().hex[:8]}.txt"
             with open(prompt_file, "w", encoding="utf-8") as f:
                 f.write(full_prompt)
 
-            cmd = [
-                NODE_CMD, CCMR_JS, "claude",
+            cmd = _claude_cmd_parts() + [
                 "--print",
                 "--dangerously-skip-permissions",
                 "--permission-mode", "bypassPermissions",
                 "--output-format", "text",
-                "--model", model or self.session.get("claude_model", "deepseek-v4-pro"),
                 "--add-dir", str(CLAUDE_WORKSPACE).replace("/", "\\"),
             ]
 
@@ -428,7 +945,7 @@ class DuoHub:
                     cwd=str(CLAUDE_WORKSPACE),
                     encoding="utf-8",
                     errors="replace",
-                    env=_ENV,
+                    env=_claude_gateway_env(model_arg),
                 )
 
             # 清理临时文件
@@ -438,8 +955,21 @@ class DuoHub:
                 pass
 
             output = (result.stdout or "").strip()
-            if not output and result.stderr:
-                output = f"[Claude 输出为空]\nstderr: {result.stderr[:500]}"
+            empty_output = not output
+            if empty_output:
+                stderr = (result.stderr or "").strip()
+                if stderr:
+                    output = (
+                        "[Claude Code CLI 未返回正文]\n"
+                        "执行类任务没有得到可用结果；普通阅读/回复请走 ccmr 轻量路径。\n"
+                        f"returncode: {result.returncode}\n"
+                        f"stderr: {stderr[:800]}"
+                    )
+                else:
+                    output = (
+                        "[Claude Code CLI 未返回正文]\n"
+                        "执行类任务没有得到可用结果；普通阅读/回复请走 ccmr 轻量路径。"
+                    )
 
             # 移除末尾的 [DuoHub:完成] 标记
             marker = "[DuoHub:完成]"
@@ -449,7 +979,7 @@ class DuoHub:
             with open(OUTBOX_CLAUDE, "w", encoding="utf-8") as f:
                 f.write(output)
 
-            self.session["claude_status"] = "done"
+            self.session["claude_status"] = "error" if empty_output else "done"
             self._save_session()
 
         except subprocess.TimeoutExpired:
@@ -479,9 +1009,33 @@ class DuoHub:
             else:
                 short_prompt = f"Read {inbox} and respond to the task. Reply in Chinese."
 
-            model_arg = model or self.session.get("lobster_model", "deepseek/deepseek-v4-flash")
-            oc_cmd = OPENCLAW_CMD
-            cmd = f'"{oc_cmd}" agent --message "{short_prompt}" --session-key duo_hub --local --json --model {model_arg}'
+            model_arg = self._normalize_lobster_model_id(model or self.session.get("lobster_model"))
+            fast_model = _lobster_fast_ccmr_model(model_arg)
+            if mode != "execute" and fast_model:
+                full_prompt = (
+                    "[Duo Hub 龙虾轻量回复模式]\n"
+                    "你代表 OpenClaw「龙虾」参与三AI协作。当前只需要快速阅读和回复，"
+                    "不要调用工具、不要执行外部动作、不要假装已经操作系统。回复使用中文，直接给结论。\n\n"
+                    f"任务：{task_text}\n\n"
+                    f"共享任务文件：{inbox}\n"
+                )
+                output = _post_ccmr_message(full_prompt, fast_model)
+                with open(OUTBOX_LOBSTER, "w", encoding="utf-8") as f:
+                    f.write(output)
+                self.session["lobster_status"] = "done"
+                self._save_session()
+                return
+
+            timeout_arg = str(min(AI_TIMEOUT, 120))
+            cmd = _openclaw_cmd_parts() + [
+                "agent",
+                "--message", short_prompt,
+                "--session-key", "main",
+                "--json",
+                "--model", model_arg,
+                "--thinking", "minimal",
+                "--timeout", timeout_arg,
+            ]
 
             result = subprocess.run(
                 cmd,
@@ -490,7 +1044,7 @@ class DuoHub:
                 timeout=AI_TIMEOUT,
                 encoding="utf-8",
                 errors="replace",
-                shell=True,
+                shell=False,
                 env=_ENV,
             )
 
@@ -771,29 +1325,190 @@ class DuoHub:
         }[ai]
         threading.Thread(target=target, args=(task_text, model, mode), daemon=True).start()
 
-    def process_task(self, task_text, needs_division=False):
-        """提交任务：同时启动三个 AI。"""
-        if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing"):
+    def process_task(self, task_text, needs_division=False, allow_paid_agents=False):
+        """提交任务：只有明确允许时才启动会消耗额度的三方 AI。"""
+        if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing", "supervising"):
             return False, "已有任务正在处理中"
 
         self.session["round"] += 1
-        self.session["phase"] = "ai_working"
         self.session["active_task_id"] = f"task_{self.session['round']:03d}"
         self.session["_needs_division"] = needs_division
+        self.write_inbox(task_text)
+        self.add_message("user", task_text)
+
+        if allow_paid_agents and _is_heartbeat_task(task_text):
+            gws = self.check_gateways()
+            self.session["phase"] = "awaiting_user"
+            for ai in AI_ORDER:
+                self.session[f"{ai}_status"] = "done"
+                self.session[f"_{ai}_collected"] = self.session["round"]
+            self._save_session()
+            self.add_message("claude", f"Claude Code 网关状态：{'在线' if gws.get('ccmr') else '离线'}。普通回复已切到 ccmr 轻量路径；需要执行代码时才会进入 Claude Code CLI。")
+            self.add_message("lobster", f"龙虾 / OpenClaw 网关状态：{'在线' if gws.get('openclaw') else '离线'}。心跳检查不再调用模型；真实任务仍按所选模型执行。")
+            self.add_message("codex", f"Codex CLI 状态：{'在线' if gws.get('codex') else '离线'}。Duo Hub 当前版本 {APP_VERSION}。")
+            self.add_message("system", "🩺 连接检查已完成；这次没有调用三方模型。")
+            return True, self.session["active_task_id"]
+
+        if not allow_paid_agents:
+            self.session["phase"] = "awaiting_user"
+            for ai in AI_ORDER:
+                self.session[f"{ai}_status"] = "idle"
+                self.session[f"_{ai}_collected"] = self.session["round"]
+            self._save_session()
+            self.add_message("system", "已记录这条内容，但未启动 Claude、龙虾或 Codex。要让三方真正分析/执行，请先勾选“启用三方调用”。")
+            return True, self.session["active_task_id"]
+
+        self.session["phase"] = "ai_working"
         for ai in AI_ORDER:
             self.session[f"{ai}_status"] = "working"
             self.session[f"_{ai}_collected"] = 0
         self._save_session()
-
-        self.write_inbox(task_text)
-        self.add_message("user", task_text)
 
         for ai in AI_ORDER:
             self._start_agent(ai, task_text, "task")
 
         return True, self.session["active_task_id"]
 
+    def supervisor_note(self, role, content):
+        """Codex 主管把当前裁决/说明同步到看板，不调用任何模型。"""
+        role = (role or "codex").strip().lower()
+        if role not in AI_LABELS:
+            role = "codex"
+        content = (content or "").strip()
+        if not content:
+            return False, "内容不能为空"
+
+        if self.session.get("phase") not in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing", "supervising"):
+            self.session["phase"] = "awaiting_user"
+        self.session["_supervisor_mode"] = True
+        self._save_session()
+        msg = self.add_message(role, content)
+        return True, msg["id"]
+
+    def supervisor_delegate(self, target, task_text, mode="task"):
+        """Codex 主管按需只委派给一个指定参与方，并把请求/回包展示在 Duo Hub。"""
+        target = (target or "").strip().lower()
+        if target not in SUPERVISOR_TARGETS:
+            return False, "target 只能是 claude、lobster 或 codex"
+
+        if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing", "supervising"):
+            return False, "已有任务正在处理中"
+
+        task_text = (task_text or "").strip()
+        if not task_text:
+            return False, "委派内容不能为空"
+
+        mode = (mode or "task").strip().lower()
+        if mode not in ("task", "negotiate", "execute"):
+            mode = "task"
+
+        self.session["round"] += 1
+        self.session["active_task_id"] = f"supervisor_{self.session['round']:03d}_{target}"
+        self.session["phase"] = "supervising"
+        self.session["_supervisor_mode"] = True
+        self.session["_supervisor_targets"] = [target]
+        self.session[f"{target}_status"] = "working"
+        self.session[f"_{target}_collected"] = 0
+        self.session[f"_{target}_started"] = time.time()
+        self._save_session()
+
+        label = AI_LABELS[target]
+        self.add_message("codex", f"【Codex 主管 -> {label}】\n{task_text}")
+        prompt = (
+            "## Codex 主管委派\n\n"
+            f"你现在是 Codex 主管调度下的参与方：{label}。\n"
+            "用户不直接与你协商；你只需要回答 Codex 主管委派给你的问题。\n"
+            "要求：\n"
+            "1. 只处理委派内容，不主动扩展到账号、发布、删除、交易等外部动作。\n"
+            "2. 如果需要外部动作或敏感数据，明确说明需要 Codex 主管回到用户处确认。\n"
+            "3. 回复给 Codex 主管，使用中文，直接给结论、依据、风险和下一步。\n\n"
+            "## 委派内容\n\n"
+            f"{task_text}"
+        )
+        self.write_inbox(prompt)
+        self._start_agent(target, prompt, mode)
+        return True, self.session["active_task_id"]
+
+    def supervisor_assign(self, assignments, mode="execute"):
+        """Codex 主管一次性下发三方分工：每个参与方只执行分给自己的任务。"""
+        if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing", "supervising"):
+            return False, "已有任务正在处理中"
+
+        if not isinstance(assignments, dict):
+            return False, "assignments 必须是对象"
+
+        cleaned = {}
+        for ai in AI_ORDER:
+            text = (assignments.get(ai) or "").strip()
+            if text:
+                cleaned[ai] = text
+
+        if not cleaned:
+            return False, "至少要给 claude、lobster 或 codex 中的一方分配任务"
+
+        mode = (mode or "execute").strip().lower()
+        if mode not in ("task", "negotiate", "execute"):
+            mode = "execute"
+
+        self.session["round"] += 1
+        self.session["active_task_id"] = f"division_{self.session['round']:03d}"
+        self.session["phase"] = "supervising"
+        self.session["_supervisor_mode"] = True
+        self.session["_supervisor_targets"] = list(cleaned.keys())
+        self.session["_division_plan"] = {ai: cleaned.get(ai, "") for ai in AI_ORDER}
+        self.session["_division_status"] = "supervisor_assigned"
+        self.session["_peer_feedback"] = {}
+
+        for ai in AI_ORDER:
+            self.session[f"{ai}_status"] = "working" if ai in cleaned else "idle"
+            self.session[f"_{ai}_collected"] = 0 if ai in cleaned else self.session["round"]
+            if ai in cleaned:
+                self.session[f"_{ai}_started"] = time.time()
+
+        self._save_session()
+
+        plan_lines = "\n".join(
+            f"- {AI_LABELS[ai]}负责：{cleaned[ai]}"
+            for ai in AI_ORDER
+            if ai in cleaned
+        )
+        self.add_message("codex", f"【Codex 主管三方分工】\n{plan_lines}")
+        self.add_message("system", f"🧭 Codex 主管已下发分工：{len(cleaned)} 个参与方并行执行。")
+
+        shared_context = self._format_recent(20)
+        for ai, assigned in cleaned.items():
+            other_parts = "\n".join(
+                f"- {AI_LABELS[other]}：{task}"
+                for other, task in cleaned.items()
+                if other != ai
+            )
+            prompt = (
+                "## Duo Hub 三方分工执行\n\n"
+                f"你是 {AI_LABELS[ai]}。Codex 主管已经把同一个总任务拆给多个参与方。\n"
+                "你只执行明确分配给你的部分，不要重复执行其他参与方的任务。\n"
+                "如果你的任务需要外部账号动作、发布、删除、交易或敏感数据，必须停止并说明需要用户确认。\n\n"
+                "## 你负责的任务\n\n"
+                f"{assigned}\n\n"
+                "## 其他参与方的任务（只作边界参考，不要代做）\n\n"
+                f"{other_parts or '无'}\n\n"
+                "## 回复要求\n\n"
+                "用中文直接报告：已完成内容、关键证据/文件、风险、下一步建议。\n\n"
+                f"---\n{shared_context}"
+            )
+            self.write_inbox(prompt)
+            self._start_agent(ai, prompt, mode)
+
+        return True, self.session["active_task_id"]
+
     def check_and_collect_results(self):
+        if not self._collect_lock.acquire(blocking=False):
+            return
+        try:
+            self._check_and_collect_results_locked()
+        finally:
+            self._collect_lock.release()
+
+    def _check_and_collect_results_locked(self):
         """检查三个 AI 是否完成，收集结果，自动推进阶段。"""
         phase = self.session["phase"]
 
@@ -871,10 +1586,21 @@ class DuoHub:
                 self.add_message("system", "🎉 三方执行完毕！请在面板中查看各自成果。")
                 self._save_session()
 
+        elif phase == "supervising":
+            targets = [ai for ai in self.session.get("_supervisor_targets", []) if ai in SUPERVISOR_TARGETS]
+            for ai in targets:
+                self._collect_if_done(ai)
+
+            if targets and self._all_done(targets):
+                names = "、".join(AI_LABELS[ai] for ai in targets)
+                self.session["phase"] = "awaiting_user"
+                self.add_message("system", f"✅ Codex 主管委派已完成：{names} 已回包。")
+                self._save_session()
+
     def _auto_negotiate(self, user_feedback=""):
         """Codex 先汇总三方初步意见并提出三方分工。"""
         context_str = self._format_recent(20)
-        feedback_block = f"\n\n## 天火大人的补充意见\n\n{user_feedback}\n" if user_feedback else ""
+        feedback_block = f"\n\n## 用户的补充意见\n\n{user_feedback}\n" if user_feedback else ""
 
         self.session["round"] += 1
         self.session["phase"] = "negotiating"
@@ -891,7 +1617,7 @@ class DuoHub:
 
         prompt = (
             "## 协商分工 - Codex 汇总提案\n\n"
-            "请阅读 Claude、龙虾和 Codex 的初步回复，以及天火大人的补充意见，提出一个明确的三方分工。\n"
+            "请阅读 Claude、龙虾和 Codex 的初步回复，以及用户的补充意见，提出一个明确的三方分工。\n"
             "必须包含：\n"
             "- Claude负责：[具体、可执行]\n"
             "- 龙虾负责：[具体、可执行]\n"
@@ -985,16 +1711,16 @@ class DuoHub:
             self.session[f"{ai}_status"] = "working"
             self.session[f"_{ai}_collected"] = 0
         if self.session.get("_division_status") == "needs_user":
-            self.add_message("system", "✅ 天火大人已强制确认当前分工！三方开始执行各自任务…")
+            self.add_message("system", "✅ 用户已强制确认当前分工！三方开始执行各自任务…")
         else:
-            self.add_message("system", "✅ 天火大人已确认分工！三方开始执行各自任务…")
+            self.add_message("system", "✅ 用户已确认分工！三方开始执行各自任务…")
         self._save_session()
 
         all_context = self._format_recent(30)
         division_plan = self.session.get("_division_plan") or {}
         shared_task = (
             "## 执行阶段 - 三方共享上下文\n\n"
-            "分工方案已经天火大人确认。每个 AI 只执行明确标注给自己的部分：\n"
+            "分工方案已经用户确认。每个 AI 只执行明确标注给自己的部分：\n"
             "- Claude 只执行「Claude负责」部分\n"
             "- 龙虾只执行「龙虾负责」部分\n"
             "- Codex 只执行「Codex负责」部分\n"
@@ -1020,6 +1746,10 @@ class DuoHub:
         """切换 AI 模型。"""
         if ai not in AI_ORDER:
             return False
+        if ai == "claude":
+            model = self._normalize_claude_model_id(model)
+        elif ai == "lobster":
+            model = self._normalize_lobster_model_id(model)
         self.session[f"{ai}_model"] = model or ""
         self._save_session()
         return True
@@ -1076,14 +1806,15 @@ class DuoHub:
             "claude_status": self.session["claude_status"],
             "lobster_status": self.session["lobster_status"],
             "codex_status": self.session.get("codex_status", "idle"),
-            "claude_model": self.session.get("claude_model", "deepseek-v4-pro"),
-            "lobster_model": self.session.get("lobster_model", "deepseek/deepseek-v4-pro"),
+            "claude_model": self._normalize_claude_model_id(self.session.get("claude_model")),
+            "lobster_model": self._normalize_lobster_model_id(self.session.get("lobster_model")),
             "codex_model": self.session.get("codex_model", ""),
             "active_task_id": self.session.get("active_task_id"),
             "gateways": self.check_gateways(),
             "agents": agents,
             "messages": recent,
             "total_messages": len(messages),
+            "loop": self.get_loop_state(),
             "division": division,
             "division_status": self.session.get("_division_status", ""),
             "peer_feedback": self.session.get("_peer_feedback", {}),
@@ -1101,11 +1832,13 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
     """HTTP 请求处理器"""
 
     def log_message(self, format, *args):
-        # 简洁日志 (避免 emoji 编码问题)
+        # Keep polling-heavy HTTP access logs from blocking responses on Windows redirects.
+        if os.environ.get("DUO_HTTP_ACCESS_LOGS", "").lower() not in ("1", "true", "yes"):
+            return
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {args[0]}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {args[0]}", flush=False)
         except UnicodeEncodeError:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] request", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] request", flush=False)
 
     # ---- 路由分发 ----
     def do_OPTIONS(self):
@@ -1121,10 +1854,16 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
             self._serve_static("index.html", "text/html; charset=utf-8")
         elif path == "/style.css":
             self._serve_static("style.css", "text/css; charset=utf-8")
+        elif path == "/supervisor_status.css":
+            self._serve_static("supervisor_status.css", "text/css; charset=utf-8")
         elif path == "/app.js":
             self._serve_static("app.js", "application/javascript; charset=utf-8")
+        elif path == "/supervisor_status.js":
+            self._serve_static("supervisor_status.js", "application/javascript; charset=utf-8")
         elif path == "/api/state":
             self._serve_json(hub.get_state())
+        elif path == "/api/loop":
+            self._serve_json(hub.get_loop_state())
         else:
             self._send_error(404, "Not Found")
 
@@ -1142,15 +1881,67 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
 
             text = data.get("text", "").strip()
             needs_division = data.get("needs_division", False)
+            allow_paid_agents = data.get("allow_paid_agents", False)
             if not text:
                 self._serve_json({"error": "任务内容不能为空"}, 400)
                 return
 
-            ok, task_id = hub.process_task(text, needs_division=needs_division)
+            ok, task_id = hub.process_task(text, needs_division=needs_division, allow_paid_agents=allow_paid_agents)
             if ok:
                 self._serve_json({"ok": True, "task_id": task_id})
             else:
                 self._serve_json({"error": task_id}, 409)
+
+        elif path == "/api/supervisor/note":
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._serve_json({"error": "Invalid JSON"}, 400)
+                return
+
+            ok, msg_id = hub.supervisor_note(
+                role=(data.get("role") or "codex"),
+                content=(data.get("content") or ""),
+            )
+            if ok:
+                self._serve_json({"ok": True, "message_id": msg_id})
+            else:
+                self._serve_json({"error": msg_id}, 400)
+
+        elif path == "/api/supervisor/delegate":
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._serve_json({"error": "Invalid JSON"}, 400)
+                return
+
+            ok, task_id = hub.supervisor_delegate(
+                target=(data.get("target") or ""),
+                task_text=(data.get("text") or ""),
+                mode=(data.get("mode") or "task"),
+            )
+            if ok:
+                self._serve_json({"ok": True, "task_id": task_id})
+            else:
+                status = 409 if "处理中" in task_id else 400
+                self._serve_json({"error": task_id}, status)
+
+        elif path == "/api/supervisor/assign":
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._serve_json({"error": "Invalid JSON"}, 400)
+                return
+
+            ok, task_id = hub.supervisor_assign(
+                assignments=(data.get("assignments") or {}),
+                mode=(data.get("mode") or "execute"),
+            )
+            if ok:
+                self._serve_json({"ok": True, "task_id": task_id})
+            else:
+                status = 409 if "处理中" in task_id else 400
+                self._serve_json({"error": task_id}, status)
 
         elif path == "/api/negotiate":
             try:
@@ -1203,6 +1994,14 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self._serve_json({"error": "无效参数"}, 400)
 
+        elif path == "/api/loop-scan":
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                data = {}
+            source = (data.get("source") or "manual").strip()[:40]
+            self._serve_json({"ok": True, "loop": hub.run_loop_scan(source=source)})
+
         else:
             self._send_error(404, "Not Found")
 
@@ -1250,13 +2049,25 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0))
         if length > 0:
-            # 循环读取确保读满所有字节（修复中文 UTF-8 截断问题）
+            previous_timeout = self.connection.gettimeout()
             raw = b""
-            while len(raw) < length:
-                chunk = self.rfile.read(length - len(raw))
-                if not chunk:
-                    break
-                raw += chunk
+            deadline = time.time() + REQUEST_BODY_TIMEOUT
+            reader = getattr(self.rfile, "read1", self.rfile.read)
+            try:
+                # 循环读取确保读满所有字节；超时后返回已收到内容，避免坏请求拖住线程。
+                while len(raw) < length:
+                    remaining_time = deadline - time.time()
+                    if remaining_time <= 0:
+                        break
+                    self.connection.settimeout(max(0.1, remaining_time))
+                    chunk = reader(min(4096, length - len(raw)))
+                    if not chunk:
+                        break
+                    raw += chunk
+            except socket.timeout:
+                pass
+            finally:
+                self.connection.settimeout(previous_timeout)
             return raw.decode("utf-8", errors="replace")
         return ""
 
@@ -1275,50 +2086,58 @@ def main():
         except Exception:
             pass
 
-    print("=" * 56)
-    print("  ⚡ Duo Hub — 天火大人的三AI协作中心")
-    print("=" * 56)
-    print()
-    print(f"  协议目录: {PROTOCOL_DIR}")
-    print(f"  前端文件: {WEB_DIR}")
-    print(f"  Claude 工作区: {CLAUDE_WORKSPACE}")
-    print(f"  Codex 工作区: {CODEX_WORKSPACE}")
-    print()
+    quiet = os.environ.get("DUO_QUIET", "").lower() in ("1", "true", "yes")
+    quiet = quiet or os.environ.get("DUO_NO_BROWSER", "").lower() in ("1", "true", "yes")
+
+    def say(*args, **kwargs):
+        if not quiet:
+            print(*args, **kwargs)
+
+    say("=" * 56)
+    say("  ⚡ Duo Hub — 三 AI 协作中心")
+    say("=" * 56)
+    say()
+    say(f"  协议目录: {PROTOCOL_DIR}")
+    say(f"  前端文件: {WEB_DIR}")
+    say(f"  Claude 工作区: {CLAUDE_WORKSPACE}")
+    say(f"  Codex 工作区: {CODEX_WORKSPACE}")
+    say()
 
     # 检查网关
-    print("[检测] 网关状态...")
+    say("[检测] 网关状态...")
     gws = hub.check_gateways()
     ccmr_icon = "[OK]" if gws["ccmr"] else "[XX]"
     oc_icon = "[OK]" if gws["openclaw"] else "[XX]"
     codex_icon = "[OK]" if gws["codex"] else "[XX]"
-    print(f"  {ccmr_icon} ccmr 网关 (端口 {CCMR_PORT})")
-    print(f"  {oc_icon} OpenClaw 网关 (端口 {OPENCLAW_PORT})")
-    print(f"  {codex_icon} Codex CLI ({CODEX_CMD})")
-    print()
+    say(f"  {ccmr_icon} ccmr 网关 (端口 {CCMR_PORT})")
+    say(f"  {oc_icon} OpenClaw 网关 (端口 {OPENCLAW_PORT})")
+    say(f"  {codex_icon} Codex CLI ({CODEX_CMD})")
+    say()
 
     if not gws["ccmr"] or not gws["openclaw"] or not gws["codex"]:
-        print("[!!] 部分网关未运行，请先启动相应网关")
-        print("     或者使用 launch_duo_hub.cmd 一键启动全部服务")
-        print()
+        say("[!!] 部分网关未运行，请先启动相应网关")
+        say("     或者使用 launch_duo_hub.cmd 一键启动全部服务")
+        say()
 
     # 启动 HTTP 服务器
     server = http.server.ThreadingHTTPServer((HOST, PORT), DuoHubHandler)
-    print(f"[启动] Duo Hub 服务器 -> http://{HOST}:{PORT}")
-    print()
-    print("  按 Ctrl+C 停止服务器")
-    print("=" * 56)
+    say(f"[启动] Duo Hub 服务器 -> http://{HOST}:{PORT}")
+    say()
+    say("  按 Ctrl+C 停止服务器")
+    say("=" * 56)
 
-    # 自动打开浏览器
-    def open_browser():
-        time.sleep(0.5)
-        webbrowser.open(f"http://{HOST}:{PORT}")
+    # 自动打开浏览器；验证或后台运行可设置 DUO_NO_BROWSER=1 跳过。
+    if os.environ.get("DUO_NO_BROWSER", "").lower() not in ("1", "true", "yes"):
+        def open_browser():
+            time.sleep(0.5)
+            webbrowser.open(f"http://{HOST}:{PORT}")
 
-    threading.Thread(target=open_browser, daemon=True).start()
+        threading.Thread(target=open_browser, daemon=True).start()
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[停止] 服务器已关闭")
+        say("\n[停止] 服务器已关闭")
         server.shutdown()
 
 

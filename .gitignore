@@ -22,6 +22,8 @@ protocol/
 
 # Config with personal paths
 config.local.json
+models.yaml
+*.bak
 
 # Temp files
 *.tmp

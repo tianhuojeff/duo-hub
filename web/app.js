@@ -2,7 +2,8 @@
  * Duo Hub — 三AI协作中心 前端逻辑
  */
 
-const POLL_INTERVAL = 500;
+const ACTIVE_POLL_INTERVAL = 250;
+const IDLE_POLL_INTERVAL = 1200;
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -22,6 +23,7 @@ const elChatMessages = $("#chat-messages");
 const elTaskInput = $("#task-input");
 const elBtnSend = $("#btn-send");
 const elBtnStop = $("#btn-stop");
+const elBtnLoopScan = $("#btn-loop-scan");
 const elBtnConfirm = $("#btn-confirm");
 const elBtnFeedback = $("#btn-feedback");
 const elBtnRenegotiate = $("#btn-renegotiate");
@@ -39,6 +41,8 @@ const elStarMapWindow = $(".star-map-window");
 const elMapViewport = $("#star-map-viewport");
 const elBtnMapExpand = $("#btn-map-expand");
 const elBtnMapGesture = $("#btn-map-gesture");
+const elLoopStatus = $("#loop-status");
+const elSupervisorStatusRoot = $("#supervisor-status-root");
 
 let state = {
   phase: "idle",
@@ -55,6 +59,9 @@ let lastMsgCount = 0;
 let taskStartTime = null;
 let elapsedTimer = null;
 let lastPhase = "idle";
+let pollTimer = null;
+let pollingState = false;
+let supervisorStatusMounted = false;
 
 const STATUS_LABELS = {
   idle: "空闲", working: "工作中…", done: "✅ 完成",
@@ -64,6 +71,7 @@ const PHASE_LABELS = {
   idle: "就绪 — 输入需求开始",
   ai_working: "⚡ AI 分析中…",
   negotiating: "🤝 自动协商中…",
+  supervising: "🧭 Codex 正在派发三方分工…",
   pending_confirmation: "📋 等待确认分工",
   awaiting_feedback: "⚠️ 等待你裁决分工",
   executing: "🔨 三方执行中…",
@@ -73,18 +81,43 @@ const PHASE_LABELS = {
 
 // === API ===
 async function fetchState() {
+  if (pollingState) return;
+  pollingState = true;
   try {
     const res = await fetch("/api/state");
     if (!res.ok) return;
     updateUI(await res.json());
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    pollingState = false;
+  }
 }
 
-async function submitTask(text, needsDivision) {
+function isFastPollingPhase(phase = state.phase) {
+  return phase === "ai_working"
+    || phase === "negotiating"
+    || phase === "supervising"
+    || phase === "executing"
+    || phase === "pending_confirmation"
+    || phase === "awaiting_feedback";
+}
+
+function scheduleStatePoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  const delay = isFastPollingPhase() ? ACTIVE_POLL_INTERVAL : IDLE_POLL_INTERVAL;
+  pollTimer = setTimeout(pollStateLoop, delay);
+}
+
+async function pollStateLoop() {
+  await fetchState();
+  scheduleStatePoll();
+}
+
+async function submitTask(text, needsDivision, allowPaidAgents) {
   const res = await fetch("/api/task", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, needs_division: needsDivision }),
+    body: JSON.stringify({ text, needs_division: needsDivision, allow_paid_agents: allowPaidAgents }),
   });
   const data = await res.json();
   if (!res.ok) { alert("错误: " + (data.error || "未知错误")); return false; }
@@ -134,6 +167,30 @@ async function stopSession() {
   location.reload();
 }
 
+async function triggerLoopScan() {
+  if (!elBtnLoopScan) return;
+  elBtnLoopScan.disabled = true;
+  const originalText = elBtnLoopScan.textContent;
+  elBtnLoopScan.textContent = "扫描中…";
+  try {
+    const res = await fetch("/api/loop-scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source: "ui" }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      alert("Loop 扫描失败: " + (data.error || "未知错误"));
+      return;
+    }
+    if (data.loop) updateLoopStatus(data.loop);
+    await fetchState();
+  } finally {
+    elBtnLoopScan.disabled = false;
+    elBtnLoopScan.textContent = originalText;
+  }
+}
+
 // === UI 更新 ===
 function updateUI(data) {
   const prevPhase = state.phase;
@@ -152,6 +209,8 @@ function updateUI(data) {
   elPhaseText.textContent = PHASE_LABELS[data.phase] || data.phase;
   updateButtonStates();
   updateStatusBadges(data);
+  updateLoopStatus(data.loop);
+  updateSupervisorStatus(data);
   updateElapsed(data.phase);
 
   // 模型选择框状态同步
@@ -173,7 +232,7 @@ function updateUI(data) {
   if (data.messages) renderAIPanels(data.messages);
 
   // 分工结果统一展示
-  if (data.division && (data.phase === "pending_confirmation" || data.phase === "awaiting_feedback" || data.phase === "executing" || data.phase === "done")) {
+  if (data.division && (data.phase === "supervising" || data.phase === "pending_confirmation" || data.phase === "awaiting_feedback" || data.phase === "executing" || data.phase === "done")) {
     const divEl = document.getElementById("division-result");
     const bodyEl = document.getElementById("division-body");
     let html = "";
@@ -273,8 +332,34 @@ function updateStatusBadges(data) {
   elCodexStatus.dataset.status = data.codex_status;
 }
 
+function updateSupervisorStatus(data) {
+  if (!elSupervisorStatusRoot || !window.DuoSupervisorStatus) return;
+  if (!supervisorStatusMounted) {
+    window.DuoSupervisorStatus.init(elSupervisorStatusRoot);
+    supervisorStatusMounted = true;
+  }
+  window.DuoSupervisorStatus.update(data);
+}
+
+function updateLoopStatus(loop) {
+  if (!elLoopStatus) return;
+  if (!loop) {
+    elLoopStatus.textContent = "Loop 未扫描";
+    elLoopStatus.dataset.status = "not_scanned";
+    return;
+  }
+  const status = loop.status || "not_scanned";
+  const updated = loop.updated_at ? loop.updated_at.slice(11, 19) : "";
+  const action = loop.next_actions && loop.next_actions.length ? loop.next_actions[0] : "";
+  elLoopStatus.dataset.status = status;
+  elLoopStatus.title = action || loop.summary || "";
+  elLoopStatus.textContent = updated
+    ? `Loop ${status} · ${updated}`
+    : `Loop ${status}`;
+}
+
 function updateButtonStates() {
-  const working = state.phase === "ai_working" || state.phase === "negotiating" || state.phase === "executing";
+  const working = state.phase === "ai_working" || state.phase === "negotiating" || state.phase === "supervising" || state.phase === "executing";
   const deciding = state.phase === "pending_confirmation" || state.phase === "awaiting_feedback";
   elBtnSend.disabled = working;
   elBtnSend.textContent = working ? "⏳ 处理中…" : deciding ? "✏️ 提交意见" : "🚀 发送";
@@ -283,7 +368,7 @@ function updateButtonStates() {
 }
 
 function updateElapsed(phase) {
-  if (phase === "ai_working" || phase === "negotiating") {
+  if (phase === "ai_working" || phase === "negotiating" || phase === "supervising" || phase === "executing") {
     if (!taskStartTime) { taskStartTime = Date.now(); startElapsedTimer(); }
   } else {
     stopElapsedTimer();
@@ -348,7 +433,7 @@ function renderMessages(messages) {
     div.className = `chat-msg role-${m.role}`;
 
     const roleLabel = {
-      user: "👤 天火大人", claude: "🔵 Claude", lobster: "🦞 龙虾", codex: "🟢 Codex", system: "⚙ 系统",
+      user: "👤 用户", claude: "🔵 Claude", lobster: "🦞 龙虾", codex: "🟢 Codex", system: "⚙ 系统",
     }[m.role] || m.role;
 
     const time = m.timestamp ? m.timestamp.slice(11, 16) : "";
@@ -408,14 +493,20 @@ elBtnSend.addEventListener("click", async () => {
   }
   if (!text) return;
   const needsDivision = document.getElementById("chk-division").checked;
-  if (await submitTask(text, needsDivision)) {
+  const allowPaidAgents = document.getElementById("chk-paid-agents").checked;
+  if (allowPaidAgents && !confirm("这会同时调用 Claude、龙虾和 Codex，可能消耗 API 额度。确认继续？")) {
+    return;
+  }
+  if (await submitTask(text, needsDivision, allowPaidAgents)) {
     elTaskInput.value = "";
     lastMsgCount = 0;
-    taskStartTime = Date.now();
-    startElapsedTimer();
-    elClaudeOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
-    elLobsterOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
-    elCodexOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
+    if (allowPaidAgents) {
+      taskStartTime = Date.now();
+      startElapsedTimer();
+      elClaudeOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
+      elLobsterOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
+      elCodexOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
+    }
     fetchState();
   }
 });
@@ -467,6 +558,7 @@ elBtnCancelDivision.addEventListener("click", async () => {
 });
 
 elBtnStop.addEventListener("click", stopSession);
+if (elBtnLoopScan) elBtnLoopScan.addEventListener("click", triggerLoopScan);
 
 elTaskInput.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); elBtnSend.click(); }
@@ -503,6 +595,12 @@ if (elMapViewport) {
   });
 }
 
+document.addEventListener("click", (e) => {
+  if (!elStarMapWindow || !elStarMapWindow.classList.contains("is-expanded")) return;
+  if (elStarMapWindow.contains(e.target)) return;
+  setMapExpanded(false);
+});
+
 window.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && elStarMapWindow && elStarMapWindow.classList.contains("is-expanded")) {
     setMapExpanded(false);
@@ -515,8 +613,7 @@ if (location.hash === "#star-map") {
 
 // === 启动 ===
 initEnergyFieldCanvas();
-fetchState();
-setInterval(fetchState, POLL_INTERVAL);
+fetchState().finally(scheduleStatePoll);
 console.log("⚡ Duo Hub 三方前端已就绪");
 
 function initGraphCanvas() {
@@ -888,7 +985,7 @@ function initEnergyFieldCanvas() {
     { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
     { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
     { key: "strategy", symbol: "St", label: "策略版本", type: "BACKTEST", color: "#e0e7ff", glow: "#6366f1", lane: 3, phase: 2.74, weight: 0.86, metric: "EVOLVE" },
-    { key: "github", symbol: "Gh", label: "GitHub v0.5.1", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
+    { key: "github", symbol: "Gh", label: "GitHub", type: "VERSION", color: "#f8fafc", glow: "#64748b", lane: 3, phase: 3.82, weight: 0.78, metric: "REMOTE" },
     { key: "log", symbol: "Lg", label: "工作日志", type: "LOG", color: "#fae8ff", glow: "#d946ef", lane: 3, phase: 4.82, weight: 0.8, metric: "TRACE" },
     { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
@@ -1227,7 +1324,7 @@ function initEnergyFieldCanvas() {
       ctx.fillText("DUO CORE", core.x, core.y - 3);
       ctx.fillStyle = "rgba(125, 211, 252, 0.7)";
       ctx.font = `500 9px ${getComputedStyle(document.documentElement).getPropertyValue("--font-mono") || "monospace"}`;
-      ctx.fillText(`v${state.version || "0.5.1"}`, core.x, core.y + 11);
+      ctx.fillText(`v${state.version || "0.5.12"}`, core.x, core.y + 11);
       ctx.textAlign = "start";
     }
   }
@@ -1415,7 +1512,7 @@ function initEnergyFieldCanvas() {
   }
 
   function currentNodeLabel(node) {
-    if (node.key === "github") return `GitHub v${state.version || "0.5.1"}`;
+    if (node.key === "github") return `GitHub v${state.version || "0.5.12"}`;
     if (node.key === "tasks") return state.phase === "awaiting_feedback" ? "待裁决任务" : "任务队列";
     if (node.key === "division" && state.division_status === "needs_user") return "分工待裁决";
     return node.label;
@@ -1427,7 +1524,7 @@ function initEnergyFieldCanvas() {
     if (node.key === "codex") return state.codex_status || "idle";
     if (node.key === "tasks") return state.phase || "idle";
     if (node.key === "division") return state.division_status || "stable";
-    if (node.key === "github") return state.version || "0.5.1";
+    if (node.key === "github") return state.version || "0.5.12";
     return node.metric;
   }
 
@@ -1789,7 +1886,7 @@ function initEnergyFieldCanvas() {
     const protocolRows = [
       { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
       { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },
-      { key: "BUILD", value: `v${state.version || "0.5.1"}`, color: "#e1e4ed", level: 0.84 },
+      { key: "BUILD", value: `v${state.version || "0.5.12"}`, color: "#e1e4ed", level: 0.84 },
     ];
     const systemRows = [
       { key: "MEMORY", value: "linked", color: "#a78bfa", level: 0.82 },
