@@ -53,6 +53,7 @@ class AgentRequest:
     mode: str
     timeout_seconds: int
     recorded_by: str = "duo-hub"
+    run_id: str = ""
 
 
 @dataclass
@@ -99,3 +100,6 @@ class AgentAdapter(ABC):
     @abstractmethod
     def invoke(self, request: AgentRequest) -> AgentRunResult:
         """Run one visible agent turn and return auditable metadata."""
+
+    def cancel(self, run_id: str = "") -> None:
+        """Cancel the active provider process for a run, when supported."""

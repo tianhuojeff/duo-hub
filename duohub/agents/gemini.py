@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,10 @@ from .base import AgentAdapter, AgentDescriptor, AgentRequest, AgentRunResult, M
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+class AgentRunCancelled(RuntimeError):
+    """Raised when a run is cancelled before its provider process starts."""
 
 
 def _now() -> str:
@@ -57,27 +62,111 @@ class _CliAdapter(AgentAdapter):
         command: str,
         workspace: Path,
         env: Mapping[str, str] | None = None,
-        runner: Runner = subprocess.run,
+        runner: Runner | None = None,
     ) -> None:
         self.descriptor = descriptor
         self.command = command
         self.workspace = workspace
         self.env = dict(env or os.environ)
         self.runner = runner
+        self._run_lock = threading.Lock()
+        self._process_lock = threading.Lock()
+        self._process: subprocess.Popen[str] | None = None
+        self._process_run_id = ""
+        self._cancelled_run_ids: set[str] = set()
 
-    def _run(self, args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        return self.runner(
-            _command_parts(self.command) + args,
-            cwd=str(self.workspace),
-            env=self.env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            creationflags=flags,
-        )
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+    def _run(self, args: list[str], timeout: int, run_id: str = "") -> subprocess.CompletedProcess[str]:
+        with self._run_lock:
+            return self._run_serialized(args, timeout, run_id)
+
+    def _run_serialized(self, args: list[str], timeout: int, run_id: str = "") -> subprocess.CompletedProcess[str]:
+        flags = 0
+        if os.name == "nt":
+            flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        command = _command_parts(self.command) + args
+
+        if self.runner is not None:
+            with self._process_lock:
+                if run_id and run_id in self._cancelled_run_ids:
+                    raise AgentRunCancelled(f"run cancelled before start: {run_id}")
+            return self.runner(
+                command,
+                cwd=str(self.workspace),
+                env=self.env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                creationflags=flags,
+            )
+
+        with self._process_lock:
+            if run_id and run_id in self._cancelled_run_ids:
+                raise AgentRunCancelled(f"run cancelled before start: {run_id}")
+            process = subprocess.Popen(
+                command,
+                cwd=str(self.workspace),
+                env=self.env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+            )
+            self._process = process
+            self._process_run_id = run_id
+
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        except subprocess.TimeoutExpired:
+            self._terminate_process(process)
+            process.communicate()
+            raise
+        finally:
+            with self._process_lock:
+                if self._process is process:
+                    self._process = None
+                    self._process_run_id = ""
+
+    def cancel(self, run_id: str = "") -> None:
+        with self._process_lock:
+            if run_id:
+                self._cancelled_run_ids.add(run_id)
+                if len(self._cancelled_run_ids) > 256:
+                    self._cancelled_run_ids.pop()
+            process = self._process
+            if run_id and self._process_run_id != run_id:
+                process = None
+        if process is not None:
+            try:
+                self._terminate_process(process)
+            except (OSError, subprocess.SubprocessError):
+                try:
+                    process.kill()
+                except OSError:
+                    pass
 
     def health_check(self) -> dict[str, Any]:
         try:
@@ -149,7 +238,7 @@ class AntigravityCliAdapter(_CliAdapter):
             "--print-timeout", f"{timeout}s",
         ]
         try:
-            result = self._run(args, timeout + 10)
+            result = self._run(args, timeout + 10, request.run_id)
         except subprocess.TimeoutExpired:
             return AgentRunResult(
                 actor=self.descriptor.id,
@@ -208,7 +297,7 @@ class GeminiCliAdapter(_CliAdapter):
             "--model", request.model or self.descriptor.default_model,
         ]
         try:
-            result = self._run(args, timeout)
+            result = self._run(args, timeout, request.run_id)
         except subprocess.TimeoutExpired:
             return AgentRunResult(
                 actor=self.descriptor.id,

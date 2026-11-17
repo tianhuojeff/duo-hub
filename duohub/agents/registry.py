@@ -57,3 +57,7 @@ class AgentRegistry:
             adapter.descriptor.id: adapter.health_check()
             for adapter in self.enabled()
         }
+
+    def cancel_all(self, run_id: str = "") -> None:
+        for adapter in self.enabled():
+            adapter.cancel(run_id)

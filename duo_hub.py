@@ -2,10 +2,13 @@
 """Duo Hub — Codex 主管与可插拔 Agent 协作中心。"""
 
 import hashlib
+import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -16,8 +19,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import webbrowser
 from datetime import datetime
+from http.cookies import SimpleCookie
 from pathlib import Path
 
 from duohub.agents import (
@@ -35,7 +40,7 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
 FAST_AI_TIMEOUT = int(os.environ.get("DUO_FAST_AI_TIMEOUT", "90"))
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 GATEWAY_CACHE_TTL = int(os.environ.get("DUO_GATEWAY_CACHE_TTL", "30"))
 GATEWAY_CHECK_TIMEOUT = float(os.environ.get("DUO_GATEWAY_CHECK_TIMEOUT", "1"))
 REQUEST_BODY_TIMEOUT = float(os.environ.get("DUO_REQUEST_BODY_TIMEOUT", "5"))
@@ -136,6 +141,7 @@ OUTBOX_GEMINI = PROTOCOL_DIR / "outbox" / "gemini.md"
 SESSION_FILE = PROTOCOL_DIR / "session.json"
 CHAT_FILE = PROTOCOL_DIR / "chat.json"
 EVENTS_FILE = PROTOCOL_DIR / "events.jsonl"
+API_TOKEN_FILE = PROTOCOL_DIR / "api_token"
 LOOP_STATE_FILE = PROTOCOL_DIR / "loop_state.json"
 LOOP_REPORT_FILE = PROTOCOL_DIR / "loop_report.md"
 
@@ -535,6 +541,7 @@ class DuoHub:
         self._gateway_cache_at = 0
         self.agent_registry = _build_agent_registry()
         self._ensure_dirs()
+        self.api_token = self._init_api_token()
         self._init_session()
         self._init_chat()
 
@@ -542,6 +549,25 @@ class DuoHub:
         PROTOCOL_DIR.mkdir(parents=True, exist_ok=True)
         (PROTOCOL_DIR / "inbox").mkdir(exist_ok=True)
         (PROTOCOL_DIR / "outbox").mkdir(exist_ok=True)
+
+    def _init_api_token(self):
+        configured = os.environ.get("DUO_API_TOKEN", "").strip()
+        if configured:
+            return configured
+        if API_TOKEN_FILE.exists():
+            try:
+                existing = API_TOKEN_FILE.read_text(encoding="utf-8").strip()
+                if existing:
+                    return existing
+            except OSError:
+                pass
+        token = secrets.token_urlsafe(32)
+        API_TOKEN_FILE.write_text(token, encoding="utf-8")
+        try:
+            API_TOKEN_FILE.chmod(0o600)
+        except OSError:
+            pass
+        return token
 
     # ---- Loop state ----
     def _default_loop_state(self):
@@ -769,6 +795,7 @@ class DuoHub:
             "phase": "idle",
             "round": 0,
             "event_seq": 0,
+            "_active_run_id": "",
             "active_task_id": None,
             "created_at": datetime.now().isoformat(),
         }
@@ -783,6 +810,7 @@ class DuoHub:
         self.session.setdefault("phase", "idle")
         self.session.setdefault("round", 0)
         self.session.setdefault("event_seq", 0)
+        self.session.setdefault("_active_run_id", "")
         self.session.setdefault("active_task_id", None)
         self.session.setdefault("created_at", datetime.now().isoformat())
         for adapter in self.agent_registry.enabled():
@@ -1010,10 +1038,27 @@ class DuoHub:
         with open(outbox, "w", encoding="utf-8") as f:
             f.write("")
 
+    def _begin_run(self):
+        run_id = f"run_{uuid.uuid4().hex}"
+        self.session["_active_run_id"] = run_id
+        return run_id
+
+    def _run_is_current(self, run_id, session_id):
+        return bool(
+            run_id
+            and session_id
+            and self.session.get("_active_run_id") == run_id
+            and self.session.get("session_id") == session_id
+        )
+
     # ---- AI 调用 ----
-    def invoke_gemini(self, task_text, model=None, mode="task"):
+    def invoke_gemini(self, task_text, model=None, mode="task", run_id="", session_id=""):
         """Invoke the logical Gemini seat through its configured provider adapter."""
         adapter = self.agent_registry.get("gemini")
+        run_id = run_id or self.session.get("_active_run_id", "")
+        session_id = session_id or self.session.get("session_id", "")
+        if not self._run_is_current(run_id, session_id):
+            return
         try:
             self.session["gemini_status"] = "working"
             self.session["_gemini_started"] = time.time()
@@ -1038,8 +1083,12 @@ class DuoHub:
                 model=requested_model,
                 mode=mode,
                 timeout_seconds=AI_TIMEOUT,
+                run_id=run_id,
             ))
+            if not self._run_is_current(run_id, session_id):
+                return
             metadata = result.metadata()
+            metadata["run_id"] = run_id
             self.session["_gemini_last_run"] = metadata
             self.session["gemini_status"] = result.status
             output = result.output if result.status == "done" else (
@@ -1051,6 +1100,8 @@ class DuoHub:
             self.append_event("agent_output", "gemini", output, metadata)
             self._save_session()
         except Exception as exc:
+            if not self._run_is_current(run_id, session_id):
+                return
             output = f"Gemini 调用出错: {exc}"
             with open(OUTBOX_GEMINI, "w", encoding="utf-8") as f:
                 f.write(output)
@@ -1061,6 +1112,7 @@ class DuoHub:
                 "provider": adapter.descriptor.provider,
                 "model": model or adapter.descriptor.default_model,
                 "status": "error",
+                "run_id": run_id,
                 "error": str(exc),
             }
             self.append_event("error", "gemini", output, self.session["_gemini_last_run"])
@@ -1522,6 +1574,13 @@ class DuoHub:
             "lobster": self.invoke_lobster,
             "codex": self.invoke_codex,
         }[ai]
+        if ai == "gemini":
+            kwargs = {
+                "run_id": self.session.get("_active_run_id", ""),
+                "session_id": self.session.get("session_id", ""),
+            }
+            threading.Thread(target=target, args=(task_text, model, mode), kwargs=kwargs, daemon=True).start()
+            return
         threading.Thread(target=target, args=(task_text, model, mode), daemon=True).start()
 
     def process_task(self, task_text, needs_division=False, allow_paid_agents=False):
@@ -1537,6 +1596,7 @@ class DuoHub:
 
         if allow_paid_agents and _is_heartbeat_task(task_text):
             gws = self.check_gateways()
+            self.session["_active_run_id"] = ""
             self.session["phase"] = "awaiting_user"
             for ai in AI_ORDER:
                 self.session[f"{ai}_status"] = "done"
@@ -1548,6 +1608,7 @@ class DuoHub:
             return True, self.session["active_task_id"]
 
         if not allow_paid_agents:
+            self.session["_active_run_id"] = ""
             self.session["phase"] = "awaiting_user"
             for ai in AI_ORDER:
                 self.session[f"{ai}_status"] = "idle"
@@ -1557,6 +1618,7 @@ class DuoHub:
             self.add_message("system", f"已记录这条内容，但未启动 {names}。要实际调用模型，请先勾选“启用 Agent 调用”。")
             return True, self.session["active_task_id"]
 
+        self._begin_run()
         self.session["phase"] = "ai_working"
         for ai in AI_ORDER:
             self.session[f"{ai}_status"] = "working"
@@ -1603,6 +1665,7 @@ class DuoHub:
 
         self.session["round"] += 1
         self.session["active_task_id"] = f"supervisor_{self.session['round']:03d}_{target}"
+        self._begin_run()
         self.session["phase"] = "supervising"
         self.session["_supervisor_mode"] = True
         self.session["_supervisor_targets"] = [target]
@@ -1651,6 +1714,7 @@ class DuoHub:
 
         self.session["round"] += 1
         self.session["active_task_id"] = f"division_{self.session['round']:03d}"
+        self._begin_run()
         self.session["phase"] = "supervising"
         self.session["_supervisor_mode"] = True
         self.session["_supervisor_targets"] = list(cleaned.keys())
@@ -1726,6 +1790,7 @@ class DuoHub:
                 self._collect_if_done(ai)
 
             if self._all_done():
+                self.session["_active_run_id"] = ""
                 if self.session.get("_needs_division"):
                     self._auto_negotiate()
                 else:
@@ -1781,6 +1846,7 @@ class DuoHub:
                 self._collect_if_done(ai)
 
             if self._all_done():
+                self.session["_active_run_id"] = ""
                 self.session["phase"] = "done"
                 self.add_message("system", "🎉 Agent 执行完毕！请在面板中查看成果。")
                 self._save_session()
@@ -1792,6 +1858,7 @@ class DuoHub:
 
             if targets and self._all_done(targets):
                 names = "、".join(AI_LABELS[ai] for ai in targets)
+                self.session["_active_run_id"] = ""
                 self.session["phase"] = "awaiting_user"
                 self.add_message("system", f"✅ Codex 主管委派已完成：{names} 已回包。")
                 self._save_session()
@@ -1918,6 +1985,7 @@ class DuoHub:
             return False, "没有待确认的分工方案"
 
         self.session["round"] += 1
+        self._begin_run()
         self.session["phase"] = "executing"
         self.session["_exec_round"] = self.session["round"]
         for ai in AI_ORDER:
@@ -1966,6 +2034,11 @@ class DuoHub:
 
     def stop_session(self):
         """重置会话（保留历史为新会话存档）"""
+        cancelled_run_id = self.session.get("_active_run_id", "")
+        if cancelled_run_id:
+            self.agent_registry.cancel_all(cancelled_run_id)
+            self.session["_active_run_id"] = ""
+
         # 归档旧会话
         if self.chat.get("messages"):
             archive_dir = PROTOCOL_DIR / "archive"
@@ -1976,6 +2049,7 @@ class DuoHub:
                     json.dump({
                         "session": self.session,
                         "chat": self.chat,
+                        "cancelled_run_id": cancelled_run_id,
                     }, f, ensure_ascii=False, indent=2)
             except Exception:
                 pass
@@ -1983,6 +2057,8 @@ class DuoHub:
         # 创建新会话
         self.session = self._new_session()
         self.chat = {"messages": []}
+        for ai in AI_ORDER:
+            self.clear_outbox(ai)
         self._save_session()
         self._save_chat()
 
@@ -2041,12 +2117,24 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
 
     # ---- 路由分发 ----
     def do_OPTIONS(self):
-        """CORS 预检请求处理"""
+        if not self._request_is_local() or not self._origin_is_allowed():
+            self._send_error(403, "Cross-origin request denied")
+            return
         self.send_response(204)
-        self._send_cors_headers()
+        origin = self.headers.get("Origin", "").strip()
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Duo-Hub-Token")
+        self._send_security_headers()
         self.end_headers()
 
     def do_GET(self):
+        if not self._request_is_local() or not self._origin_is_allowed():
+            self._send_error(403, "Local same-origin access only")
+            return
         path = urllib.parse.urlparse(self.path).path
 
         if path == "/" or path == "/index.html":
@@ -2067,6 +2155,12 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
             self._send_error(404, "Not Found")
 
     def do_POST(self):
+        if not self._request_is_local() or not self._origin_is_allowed():
+            self._send_error(403, "Local same-origin access only")
+            return
+        if not self._post_token_is_valid():
+            self._send_error(401, "Missing or invalid Duo Hub API token")
+            return
         path = urllib.parse.urlparse(self.path).path
 
         body = self._read_body()
@@ -2217,7 +2311,12 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", len(data))
-            self._send_cors_headers()
+            if filename == "index.html":
+                self.send_header(
+                    "Set-Cookie",
+                    f"duo_hub_token={hub.api_token}; HttpOnly; SameSite=Strict; Path=/",
+                )
+            self._send_security_headers()
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "close")
             self.close_connection = True
@@ -2232,7 +2331,7 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", len(body))
-        self._send_cors_headers()
+        self._send_security_headers()
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.close_connection = True
@@ -2240,10 +2339,58 @@ class DuoHubHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.wfile.flush()
 
-    def _send_cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+    def _send_security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+        )
+
+    @staticmethod
+    def _loopback_hostname(value):
+        try:
+            hostname = urllib.parse.urlsplit(f"//{value}").hostname
+            return bool(hostname and (
+                hostname.lower() == "localhost" or ipaddress.ip_address(hostname).is_loopback
+            ))
+        except ValueError:
+            return False
+
+    def _request_is_local(self):
+        try:
+            client_is_local = ipaddress.ip_address(self.client_address[0]).is_loopback
+        except ValueError:
+            client_is_local = False
+        return client_is_local and self._loopback_hostname(self.headers.get("Host", ""))
+
+    def _origin_is_allowed(self):
+        origin = self.headers.get("Origin", "").strip()
+        if not origin:
+            return True
+        try:
+            parsed = urllib.parse.urlsplit(origin)
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            return (
+                parsed.scheme == "http"
+                and self._loopback_hostname(parsed.netloc)
+                and port == PORT
+            )
+        except ValueError:
+            return False
+
+    def _post_token_is_valid(self):
+        supplied = self.headers.get("X-Duo-Hub-Token", "").strip()
+        if not supplied:
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+                supplied = cookie.get("duo_hub_token").value if cookie.get("duo_hub_token") else ""
+            except Exception:
+                supplied = ""
+        return bool(supplied) and hmac.compare_digest(supplied, hub.api_token)
 
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0))

@@ -1,4 +1,7 @@
 import subprocess
+import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -102,6 +105,30 @@ class CliAdapterTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.exit_code, 41)
         self.assertEqual(result.error, "auth required")
+
+    def test_cancel_terminates_provider_process_tree(self):
+        adapter = AntigravityCliAdapter(
+            descriptor=descriptor("antigravity-cli"),
+            command=sys.executable,
+            workspace=Path.cwd(),
+        )
+        completed = []
+
+        def run_sleeper():
+            completed.append(adapter._run(["-c", "import time; time.sleep(30)"], 30, "run-cancel"))
+
+        thread = threading.Thread(target=run_sleeper)
+        thread.start()
+        deadline = time.time() + 5
+        while adapter._process is None and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertIsNotNone(adapter._process)
+        adapter.cancel("run-cancel")
+        thread.join(timeout=8)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(completed), 1)
+        self.assertNotEqual(completed[0].returncode, 0)
 
 
 if __name__ == "__main__":

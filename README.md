@@ -1,6 +1,6 @@
 # Duo Hub
 
-Duo Hub 是一个本机 Agent 协作看板。当前 `0.6.0` 阶段由 Codex 负责主管调度，只启用一个逻辑席位 `gemini`；默认通过已登录的 Antigravity CLI 调用 Gemini 模型。
+Duo Hub 是一个本机 Agent 协作看板。当前 `0.6.1` 阶段由 Codex 负责主管调度，只启用一个逻辑席位 `gemini`；默认通过已登录的 Antigravity CLI 调用 Gemini 模型。
 
 Claude Code 和 OpenClaw 的旧实现仍保留为兼容代码，但没有注册到当前 Agent Registry，也不会出现在页面或默认调用链中。
 
@@ -14,6 +14,8 @@ Claude Code 和 OpenClaw 的旧实现仍保留为兼容代码，但没有注册�
 - 可审计事件：`events.jsonl` 逐条保存可见 prompt/output 事件、actor、recorded_by、provider、model、退出码、耗时、usage 和内容哈希。
 - 会话恢复：`session.json`、`chat.json`、outbox 和事件序号在服务重启后继续恢复。
 - 动态页面：Agent 面板、模型列表、网关状态、分工状态和聊天角色均按 API 返回的注册表生成。
+- 本机请求保护：所有 POST 必须携带 HttpOnly 同源 cookie 或 `X-Duo-Hub-Token`，拒绝非回环 Host、恶意 Origin 和宽泛 CORS。
+- 可取消运行：重置会话会终止当前 provider 进程树；旧 run ID 与 session ID 失效后不能写入新会话或新 outbox。
 
 ## 架构
 
@@ -100,6 +102,7 @@ python .\duo_hub.py
 | `DUO_GEMINI_WORKSPACE` | 跟随 Codex 工作区 | Gemini 席位的工作目录 |
 | `DUO_ANTIGRAVITY_CMD` | 自动检测 | `agy.exe` 的完整路径 |
 | `DUO_GEMINI_CMD` | 自动检测 | `gemini.cmd` 的完整路径 |
+| `DUO_API_TOKEN` | 自动生成 | 覆盖本机 POST API token；默认保存在协议目录的 `api_token` |
 | `DUO_NO_BROWSER` | 空 | 设为 `1` 时不自动打开浏览器 |
 
 ## API
@@ -120,10 +123,12 @@ $body = @{
   needs_division = $false
   allow_paid_agents = $true
 } | ConvertTo-Json
+$token = (Get-Content "$env:USERPROFILE\.duo_hub\protocol\api_token" -Raw).Trim()
 
 Invoke-RestMethod `
   -Method Post `
   -Uri http://127.0.0.1:5199/api/task `
+  -Headers @{ "X-Duo-Hub-Token" = $token } `
   -ContentType "application/json; charset=utf-8" `
   -Body $body
 ```
@@ -137,4 +142,4 @@ node --check .\web\app.js
 node --check .\web\supervisor_status.js
 ```
 
-Phase 1 的验收重点是：页面只显示注册的 Gemini 席位、能收到真实回包、metadata 明确记录 provider/model/退出码/usage，并且重启后结果仍可恢复。鉴权、CORS、进程取消和并发隔离属于后续 Phase 2。
+Phase 1 已完成 Gemini Registry、真实回包、metadata 审计和重启恢复。Phase 2 已完成 POST token、同源/回环限制、安全响应头、provider 进程树取消和旧会话写入隔离。下一阶段对比 Antigravity App/CLI 与 Gemini CLI 的实际操作成本，再决定 Windows App 的默认入口。
