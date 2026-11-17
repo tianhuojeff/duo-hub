@@ -345,10 +345,10 @@ body.map-immersive::after {
   backdrop-filter: blur(10px);
 }
 
-/* ====== 三栏AI面板 ====== */
+/* ====== 注册表驱动的 Agent 面板 ====== */
 .main-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 12px;
   padding: 12px 20px;
   flex: 1 0 auto;
@@ -370,6 +370,19 @@ body.map-immersive::after {
 .claude-panel { border-top: 3px solid var(--claude-blue); }
 .lobster-panel { border-top: 3px solid var(--lobster-amber); }
 .codex-panel { border-top: 3px solid var(--codex-green); }
+.registry-agent-panel { border-top: 3px solid var(--agent-color, #38bdf8); }
+
+.gateway-indicators {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-provider {
+  color: var(--text-dim);
+  font-size: 0.72em;
+}
 
 .panel-header {
   display: flex;
@@ -521,6 +534,7 @@ body.map-immersive::after {
   overflow-wrap: anywhere;
 }
 .chat-msg.role-user .msg-role    { color: #60a5fa; }
+.chat-msg.role-gemini .msg-role  { color: #8b5cf6; }
 .chat-msg.role-claude .msg-role  { color: var(--claude-blue); }
 .chat-msg.role-lobster .msg-role { color: var(--lobster-amber); }
 .chat-msg.role-codex .msg-role   { color: var(--codex-green); }

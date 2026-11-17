@@ -9,7 +9,7 @@
   display: grid;
   grid-template-columns: minmax(420px, 1.2fr) minmax(280px, 0.8fr);
   gap: 14px;
-  min-height: 210px;
+  min-height: 260px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 10px;
   background: linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(17, 24, 39, 0.86));
@@ -19,14 +19,14 @@
 
 .supervisor-status__map {
   position: relative;
-  min-height: 210px;
+  min-height: 260px;
   padding: 22px;
 }
 
 .supervisor-status__core {
   position: absolute;
   left: 50%;
-  top: 50%;
+  top: 68%;
   z-index: 3;
   display: grid;
   place-items: center;
@@ -63,10 +63,16 @@
 .supervisor-status__nodes {
   position: absolute;
   inset: 20px;
+  display: flex;
+  align-content: flex-start;
+  align-items: flex-start;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 
 .supervisor-status__agent {
-  position: absolute;
+  position: relative;
   z-index: 2;
   display: flex;
   align-items: center;
@@ -79,21 +85,6 @@
   background: rgba(2, 6, 23, 0.68);
   color: #e5e7eb;
   transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
-}
-
-.supervisor-status__agent[data-agent="claude"] {
-  left: 5%;
-  top: 12%;
-}
-
-.supervisor-status__agent[data-agent="lobster"] {
-  right: 5%;
-  top: 12%;
-}
-
-.supervisor-status__agent[data-agent="codex"] {
-  right: 5%;
-  bottom: 8%;
 }
 
 .supervisor-status__agent[data-status="working"] {
@@ -164,27 +155,6 @@
   animation: supervisor-status-link-flow 1.6s linear infinite;
   opacity: 0.85;
   transform-origin: left center;
-}
-
-.supervisor-status__link--claude {
-  left: 25%;
-  top: 47%;
-  width: 24%;
-  transform: rotate(-24deg);
-}
-
-.supervisor-status__link--lobster {
-  left: 51%;
-  top: 47%;
-  width: 24%;
-  transform: rotate(24deg);
-}
-
-.supervisor-status__link--codex {
-  left: 54%;
-  top: 61%;
-  width: 18%;
-  transform: rotate(26deg);
 }
 
 .supervisor-status__side {
@@ -290,14 +260,6 @@
     width: min(210px, 42vw);
   }
 
-  .supervisor-status__agent[data-agent="claude"] {
-    left: 2%;
-  }
-
-  .supervisor-status__agent[data-agent="lobster"] {
-    right: 2%;
-  }
-
   .supervisor-status__side {
     border-left: 0;
     border-top: 1px solid rgba(148, 163, 184, 0.14);
@@ -314,22 +276,7 @@
   }
 
   .supervisor-status__agent {
-    left: 50% !important;
-    right: auto !important;
     width: min(250px, calc(100vw - 56px));
-    transform: translateX(-50%);
-  }
-
-  .supervisor-status__agent[data-agent="claude"] {
-    top: 18px;
-  }
-
-  .supervisor-status__agent[data-agent="lobster"] {
-    top: 104px;
-  }
-
-  .supervisor-status__agent[data-agent="codex"] {
-    bottom: 18px;
   }
 
   .supervisor-status__core {

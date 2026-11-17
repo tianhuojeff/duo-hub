@@ -1,151 +1,140 @@
-# Duo Hub - 三AI协作中心
+# Duo Hub
 
-当前版本：`0.5.16`
+Duo Hub 是一个本机 Agent 协作看板。当前 `0.6.0` 阶段由 Codex 负责主管调度，只启用一个逻辑席位 `gemini`；默认通过已登录的 Antigravity CLI 调用 Gemini 模型。
 
-让 Codex 作为主管直接派发 Claude Code、OpenClaw(龙虾) 和 Codex 三方分工，Duo Hub 负责展示派发、回包和协作状态。
+Claude Code 和 OpenClaw 的旧实现仍保留为兼容代码，但没有注册到当前 Agent Registry，也不会出现在页面或默认调用链中。
 
-## 功能
+## 当前能力
 
-- 🧭 **Codex 主管模式**：主对话留在 Codex，Codex 负责拆任务、派发、汇总和裁决，Duo Hub 展示透明调度过程
-- 🧩 Supervisor API：`/api/supervisor/note` 记录 Codex 裁决，`/api/supervisor/delegate` 委派给单个参与方，`/api/supervisor/assign` 一次性下发三方分工
-- 🔵🦞🟢 保留三 AI 广播/协商入口，用于手动测试或需要平级协商的任务
-- 🤝 协商分工：Codex 汇总三方意见 → Claude/龙虾确认或调整 → 不一致时暂停等待用户裁决
-- 🧭 用户裁决：确认执行、输入修改意见、继续协商、取消分工
-- ✅ 确认后自动执行各自任务
-- 🎛 模型切换（下拉框选择）
-- 💰 付费 Agent 护栏：默认发送只记录任务，不启动三方模型；勾选后才调用 Claude、龙虾和 Codex
-- ⚡ 工作中快速刷新：三方执行/协商时前端更快收集已完成回复，空闲时自动降频
-- 🚀 轻量回复路径：普通阅读/回复时，模型槽位可直连本地 ccmr 网关
-- 🛟 模型来源审计：界面保留槽位与底层模型的映射，不把代理模型冒充为其他模型
-- 🧯 协议文件容错：`chat.json` 被手动写成数组时会自动合并回 `messages` 结构，避免状态接口被坏结构拖死
-- 🧊 静默 HTTP 访问日志：默认不打印高频轮询日志，避免 Windows 后台重定向阻塞前端响应
-- 💤 后台启动静默：`DUO_NO_BROWSER=1` 或 `DUO_QUIET=1` 时跳过启动横幅输出，避免卡在已监听但未进入服务循环的半启动状态
-- 🔒 开代理时自动为 `127.0.0.1/localhost/::1` 设置本地直连，外网流量仍按用户代理设置走
-- 🩺 心跳/连接检查不会调用模型：`说话`、`来`、`检查连接` 等短任务直接返回本地网关状态
-- 🔁 Loop 扫描：不调用模型，只检查本地网关、会话、分工阻塞、outbox 和仓库变更，并写入 `loop_state.json` / `loop_report.md`
-- 🌌 JARVIS 语义控制台：语义星体分布在三维球面，滚轮/手势缩放内容，鼠标轨迹球拖动支持任意方向旋转惯性
-- 💾 会话持久化，刷新不丢失
+- 注册表驱动：后端、API 和页面从同一个 Agent Registry 读取参与方，不再把面板写死为固定三方。
+- 可替换 provider：逻辑席位仍叫 `gemini`，实际调用来源单独记录为 `antigravity-cli` 或 `gemini-cli`。
+- 真实 CLI 回包：默认用 Antigravity CLI 的 headless JSON 模式调用 `gemini-4-hydrogen-medium`。
+- 明确调用护栏：普通发送只记录内容；只有勾选“启用 Agent 调用”才会实际消耗模型额度。
+- 只读分析模式：Phase 1 的 Gemini 调用固定为 plan/分析模式，不允许模型直接改文件、发布或执行账号动作。
+- 可审计事件：`events.jsonl` 逐条保存可见 prompt/output 事件、actor、recorded_by、provider、model、退出码、耗时、usage 和内容哈希。
+- 会话恢复：`session.json`、`chat.json`、outbox 和事件序号在服务重启后继续恢复。
+- 动态页面：Agent 面板、模型列表、网关状态、分工状态和聊天角色均按 API 返回的注册表生成。
 
-## 前置要求
+## 架构
 
-- Python 3.8+
-- Node.js 22+
-- [ccmr](https://github.com/anthropics/claude-code-model-router) (Claude Code Model Router)
-- [OpenClaw](https://openclaw.ai) 网关运行中
-- Codex CLI 已登录并可运行
-
-## 快速开始
-
-```bash
-# 1. 启动 ccmr 网关
-ccmr start --port 18080 --host 127.0.0.1
-
-# 2. 启动 OpenClaw 网关
-openclaw gateway run
-
-# 3. 启动 Duo Hub
-cd duo-hub
-python duo_hub.py
-
-# 4. 打开浏览器
-# http://127.0.0.1:5199
+```text
+浏览器 / 后续桌面壳
+        |
+        v
+Duo Hub HTTP API
+        |
+        +-- Agent Registry -- logical id: gemini
+        |                         |
+        |                         +-- provider: antigravity-cli (默认)
+        |                         +-- provider: gemini-cli (可选)
+        |
+        +-- session.json / chat.json / outbox
+        +-- events.jsonl (append-only 可见事件)
 ```
 
-或一键启动：
-```bash
-launch_duo_hub.cmd   # Windows
+`actor` 表示是谁产生内容，`recorded_by` 表示谁写入事件，`provider` 表示实际调用通道；三者不会混写。例如当前成功回包应记录为：
+
+```json
+{
+  "actor": "gemini",
+  "recorded_by": "duo-hub",
+  "provider": "antigravity-cli",
+  "model": "gemini-4-hydrogen-medium"
+}
 ```
 
-## 配置
+## 依赖
 
-默认读取 `config.json`。本机私有路径建议写到已被 `.gitignore` 忽略的 `config.local.json`，会覆盖 `config.json`；也可以通过环境变量覆盖：
+- Python 3.10+
+- 默认路径：Antigravity CLI 已安装并完成登录
+- 可选路径：Google Gemini CLI 已安装，并已通过 Google 登录、`GEMINI_API_KEY` 或 Vertex AI 完成认证
 
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `DUO_PORT` | 5199 | 服务器端口 |
-| `DUO_PROTOCOL_DIR` | ~/.duo_hub/protocol | 协议/会话存储目录 |
-| `DUO_CLAUDE_WORKSPACE` | 当前目录 | Claude 工作目录 |
-| `DUO_CODEX_WORKSPACE` | 当前目录 | Codex 工作目录 |
-| `DUO_CCMR_PORT` | 18080 | ccmr 网关端口 |
-| `DUO_OPENCLAW_PORT` | 18789 | OpenClaw 网关端口 |
-| `DUO_CCMR_JS` | 自动检测 | ccmr cli.js 路径 |
-| `DUO_OPENCLAW_CMD` | 自动检测 | openclaw 命令路径 |
-| `DUO_CODEX_CMD` | 自动检测 | codex 命令路径，Windows 优先 codex.cmd |
-| `DUO_AI_TIMEOUT` | 300 | AI 响应超时(秒) |
+当前默认配置不要求 ccmr、Claude Code 或 OpenClaw 网关运行。
 
-## 使用
+## 启动
 
-默认推荐把 Codex 当前对话作为主控入口，Duo Hub 只做调度看板：
+PowerShell：
 
-1. 用户在 Codex 对话里提出任务。
-2. Codex 判断是否需要三方分工；不需要时直接解决。
-3. 需要三方分工时，Codex 调用 `/api/supervisor/assign`，分别给 `claude`、`lobster`、`codex` 下发不同任务。
-4. Duo Hub 页面展示三方分工内容、各自状态、回包和完成状态。
-5. Codex 在当前对话里汇总、裁决、执行后续动作，并用 `/api/supervisor/note` 把关键裁决同步到看板。
-
-仍保留旧手动入口：
-
-1. 在 Duo Hub 输入任务，可选勾选「🤝 需要分工」。
-2. 默认发送只记录任务，不调用付费 Agent；需要三方实际分析时勾选「💰 启用三方调用」并确认。
-3. 勾了分工时仍可走旧的三方广播/协商流程。
-
-Supervisor API 示例：
-
-```bash
-curl -s -H "Content-Type: application/json" \
-  -d "{\"role\":\"codex\",\"content\":\"Codex 主管：这里是主对话，Duo Hub 是透明看板。\"}" \
-  http://127.0.0.1:5199/api/supervisor/note
-
-curl -s -H "Content-Type: application/json" \
-  -d "{\"target\":\"claude\",\"text\":\"请检查这个实现方向是否有明显风险。\"}" \
-  http://127.0.0.1:5199/api/supervisor/delegate
-
-curl -s -H "Content-Type: application/json" \
-  -d "{\"assignments\":{\"claude\":\"审查方案风险和遗漏。\",\"lobster\":\"验证本机 OpenClaw/任务状态。\",\"codex\":\"实现代码改动并汇总结果。\"}}" \
-  http://127.0.0.1:5199/api/supervisor/assign
+```powershell
+Set-Location C:\Users\tianhuo\Documents\GitHub\duo-hub
+python .\duo_hub.py
 ```
-8. 点「Loop 扫描」可做一次本地闭环检查；它只读本地状态，不调用 Claude、龙虾或 Codex
 
-## 设计修正
+然后打开 <http://127.0.0.1:5199/>。
 
-旧版把参与者写死成 `claude/lobster` 两方，协商流程固定为「Claude 提方案 → 龙虾确认」。这会导致：
+用于隔离验证时，可以指定独立协议目录并禁止自动打开浏览器：
 
-- 新参与者无法自然接入
-- 一方说“同意但需要调整”也可能被关键词误判为协商完成
-- 状态机存在 `awaiting_user` 等前端未覆盖状态
-
-新版改为三方流程：初始阶段三方并行响应；需要分工时由 Codex 汇总三方意见提出结构化分工，Claude 和龙虾并行确认；只有明确一致时才进入普通确认。若任何一方不同意或要求补充确认，面板进入用户裁决状态，不再把分歧伪装成最终结果。
-
-## Loop 扫描
-
-`Loop 扫描` 是 Duo Hub 的最小工程闭环，不负责自动启动三方模型。它做四件事：
-
-- 发现：读取当前 phase、三方状态、网关在线状态、outbox 更新时间和仓库变更。
-- 判断：识别等待用户确认、协商分歧、网关离线、Agent 超时/错误等阻塞项。
-- 记录：写入协议目录下的 `loop_state.json` 和 `loop_report.md`。
-- 交接：在前端显示当前 Loop 状态和第一条下一步动作。
-
-这个功能对应 Loop Engineering 的“状态文件 + 验证者 + 下一步”部分；真正调用付费 Agent 仍必须由用户勾选「启用三方调用」。
-
-## 版本规则
-
-每次更新并推送 GitHub 前，必须同步更新：
-
-- `VERSION`
-- `duo_hub.py` 里的 `APP_VERSION`
-- README 顶部的当前版本
-
-## 项目结构
-
+```powershell
+$env:DUO_PROTOCOL_DIR = "$env:TEMP\duohub-test\protocol"
+$env:DUO_GEMINI_WORKSPACE = (Get-Location).Path
+$env:DUO_NO_BROWSER = "1"
+python .\duo_hub.py
 ```
-duo-hub/
-├── duo_hub.py          # 主服务器
-├── config.json         # 配置文件
-├── launch_duo_hub.cmd  # Windows 一键启动
-├── web/
-│   ├── index.html
-│   ├── style.css
-│   └── app.js
-├── README.md
-└── .gitignore
+
+## 配置 Agent provider
+
+默认 `config.json`：
+
+```json
+{
+  "agents": [
+    {
+      "id": "gemini",
+      "enabled": true,
+      "invoke_by_default": true,
+      "provider": "antigravity-cli",
+      "model": "gemini-4-hydrogen-medium"
+    }
+  ]
+}
 ```
+
+若 Gemini CLI 已完成认证，可把 provider 切换为 `gemini-cli`，并选择其支持的模型。Duo Hub 会在回包 metadata 中保留真实 provider，不能把 Antigravity CLI 的结果冒充为 Gemini CLI 结果。
+
+常用环境变量：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `DUO_PORT` | `5199` | 本机 HTTP 端口 |
+| `DUO_PROTOCOL_DIR` | `%USERPROFILE%\.duo_hub\protocol` | 会话、聊天、outbox 与事件目录 |
+| `DUO_GEMINI_WORKSPACE` | 跟随 Codex 工作区 | Gemini 席位的工作目录 |
+| `DUO_ANTIGRAVITY_CMD` | 自动检测 | `agy.exe` 的完整路径 |
+| `DUO_GEMINI_CMD` | 自动检测 | `gemini.cmd` 的完整路径 |
+| `DUO_NO_BROWSER` | 空 | 设为 `1` 时不自动打开浏览器 |
+
+## API
+
+- `GET /api/state`：会话、动态 Agent 列表、provider 健康状态、分工与最近消息。
+- `POST /api/task`：记录任务；`allow_paid_agents=true` 时才实际调用当前 Agent。
+- `POST /api/supervisor/delegate`：Codex 主管委派给一个已注册 Agent。
+- `POST /api/supervisor/assign`：按注册表下发一组任务。
+- `POST /api/set-model`：切换逻辑席位模型。
+- `POST /api/loop-scan`：不调用模型，只检查本地状态并写 Loop 报告。
+- `POST /api/stop`：归档当前会话并创建新会话。
+
+最小调用示例：
+
+```powershell
+$body = @{
+  text = "请分析这个方案，只返回结论和风险"
+  needs_division = $false
+  allow_paid_agents = $true
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:5199/api/task `
+  -ContentType "application/json; charset=utf-8" `
+  -Body $body
+```
+
+## 验证
+
+```powershell
+python -m compileall -q .\duo_hub.py .\duohub
+python -m unittest discover -s tests -v
+node --check .\web\app.js
+node --check .\web\supervisor_status.js
+```
+
+Phase 1 的验收重点是：页面只显示注册的 Gemini 席位、能收到真实回包、metadata 明确记录 provider/model/退出码/usage，并且重启后结果仍可恢复。鉴权、CORS、进程取消和并发隔离属于后续 Phase 2。

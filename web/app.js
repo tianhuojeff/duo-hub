@@ -1,24 +1,13 @@
-/**
- * Duo Hub — 三AI协作中心 前端逻辑
- */
+/** Duo Hub — dynamic Agent Registry front end. */
 
 const ACTIVE_POLL_INTERVAL = 250;
 const IDLE_POLL_INTERVAL = 1200;
 
 const $ = (sel) => document.querySelector(sel);
 
-const elClaudeOutput = $("#claude-output");
-const elLobsterOutput = $("#lobster-output");
-const elCodexOutput = $("#codex-output");
-const elClaudeStatus = $("#claude-status-badge");
-const elLobsterStatus = $("#lobster-status-badge");
-const elCodexStatus = $("#codex-status-badge");
-const elClaudeModel = $("#claude-model");
-const elLobsterModel = $("#lobster-model");
-const elCodexModel = $("#codex-model");
-const elClaudeElapsed = $("#claude-elapsed");
-const elLobsterElapsed = $("#lobster-elapsed");
-const elCodexElapsed = $("#codex-elapsed");
+const elAgentPanels = $("#agent-panels");
+const elGatewayIndicators = $("#gateway-indicators");
+const elMapAgentReadouts = $("#map-agent-readouts");
 const elChatMessages = $("#chat-messages");
 const elTaskInput = $("#task-input");
 const elBtnSend = $("#btn-send");
@@ -33,9 +22,6 @@ const elConfirmText = $("#confirm-text");
 const elPhaseText = $("#phase-text");
 const elSessionId = $("#session-id");
 const elAppVersion = $("#app-version");
-const elGwCcmr = $("#gw-ccmr");
-const elGwLobster = $("#gw-lobster");
-const elGwCodex = $("#gw-codex");
 const elGraphCanvas = $("#graph-canvas");
 const elStarMapWindow = $(".star-map-window");
 const elMapViewport = $("#star-map-viewport");
@@ -46,15 +32,12 @@ const elSupervisorStatusRoot = $("#supervisor-status-root");
 
 let state = {
   phase: "idle",
-  claude_status: "idle",
-  lobster_status: "idle",
-  codex_status: "idle",
+  agents: [],
   messages: [],
-  gateways: { ccmr: false, openclaw: false, codex: false },
+  gateways: {},
 };
-let lastClaudeMsgIdx = -1;
-let lastLobsterMsgIdx = -1;
-let lastCodexMsgIdx = -1;
+const agentViews = new Map();
+const lastAgentMessageIds = new Map();
 let lastMsgCount = 0;
 let taskStartTime = null;
 let elapsedTimer = null;
@@ -71,10 +54,10 @@ const PHASE_LABELS = {
   idle: "就绪 — 输入需求开始",
   ai_working: "⚡ AI 分析中…",
   negotiating: "🤝 自动协商中…",
-  supervising: "🧭 Codex 正在派发三方分工…",
+  supervising: "🧭 Codex 正在派发 Agent 分工…",
   pending_confirmation: "📋 等待确认分工",
   awaiting_feedback: "⚠️ 等待你裁决分工",
-  executing: "🔨 三方执行中…",
+  executing: "🔨 Agent 执行中…",
   done: "🎉 全部完成！",
   awaiting_user: "就绪 — 可继续输入需求",
 };
@@ -191,11 +174,85 @@ async function triggerLoopScan() {
   }
 }
 
+function createElement(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+
+function ensureAgentViews(agents = []) {
+  const activeIds = new Set(agents.map((agent) => agent.id));
+  for (const [id, view] of agentViews.entries()) {
+    if (!activeIds.has(id)) {
+      view.panel.remove();
+      agentViews.delete(id);
+      lastAgentMessageIds.delete(id);
+    }
+  }
+
+  for (const agent of agents) {
+    let view = agentViews.get(agent.id);
+    if (!view) {
+      const panel = createElement("section", "ai-panel registry-agent-panel");
+      panel.dataset.agent = agent.id;
+      panel.style.borderTopColor = agent.color || "#38bdf8";
+      const header = createElement("div", "panel-header");
+      const icon = createElement("span", "ai-icon", agent.icon || "AI");
+      icon.style.color = agent.color || "#38bdf8";
+      const name = createElement("span", "ai-name", agent.label || agent.id);
+      const model = createElement("select", "model-select");
+      model.title = "切换模型";
+      for (const option of agent.models || []) {
+        const modelOption = document.createElement("option");
+        modelOption.value = option.id;
+        modelOption.textContent = option.label || option.id;
+        model.append(modelOption);
+      }
+      model.addEventListener("change", () => setModel(agent.id, model.value));
+      const status = createElement("span", "ai-status", "空闲");
+      status.dataset.status = "idle";
+      header.append(icon, name, model, status);
+      const output = createElement("div", "panel-body");
+      output.append(createElement("div", "placeholder", "等待任务提交…"));
+      const footer = createElement("div", "panel-footer");
+      const provider = createElement("span", "agent-provider", agent.provider || "");
+      const elapsed = createElement("span", "elapsed");
+      footer.append(provider, elapsed);
+      panel.append(header, output, footer);
+      elAgentPanels.append(panel);
+      view = { panel, model, status, output, elapsed, provider };
+      agentViews.set(agent.id, view);
+    }
+    view.provider.textContent = agent.provider || "";
+    if (agent.model !== undefined && view.model.value !== agent.model) {
+      view.model.value = agent.model;
+    }
+    elAgentPanels.append(view.panel);
+  }
+
+  if (elMapAgentReadouts) {
+    elMapAgentReadouts.replaceChildren();
+    for (const agent of agents) {
+      const item = createElement("span", "", agent.label || agent.id);
+      item.style.setProperty("--dot", agent.color || "#38bdf8");
+      elMapAgentReadouts.append(item);
+    }
+  }
+}
+
+function setAllAgentPlaceholders(text) {
+  for (const view of agentViews.values()) {
+    view.output.replaceChildren(createElement("div", "placeholder", text));
+  }
+}
+
 // === UI 更新 ===
 function updateUI(data) {
   const prevPhase = state.phase;
   state = data;
 
+  ensureAgentViews(data.agents || []);
   updateGatewayIndicators(data.gateways);
   if (data.session_id) elSessionId.textContent = "会话 " + data.session_id.slice(-8);
   if (data.version && elAppVersion) elAppVersion.textContent = "v" + data.version;
@@ -213,17 +270,6 @@ function updateUI(data) {
   updateSupervisorStatus(data);
   updateElapsed(data.phase);
 
-  // 模型选择框状态同步
-  if (data.claude_model && elClaudeModel.value !== data.claude_model) {
-    elClaudeModel.value = data.claude_model;
-  }
-  if (data.lobster_model !== undefined && elLobsterModel.value !== data.lobster_model) {
-    elLobsterModel.value = data.lobster_model;
-  }
-  if (data.codex_model !== undefined && elCodexModel.value !== data.codex_model) {
-    elCodexModel.value = data.codex_model;
-  }
-
   // 消息渲染
   if (data.messages && data.messages.length > lastMsgCount) {
     renderMessages(data.messages);
@@ -236,25 +282,22 @@ function updateUI(data) {
     const divEl = document.getElementById("division-result");
     const bodyEl = document.getElementById("division-body");
     let html = "";
-    if (data.division.claude) {
-      html += '<div class="division-item"><strong>🔵 Claude 负责:</strong><br>' + renderMarkdown(data.division.claude) + '</div>';
-    }
-    if (data.division.lobster) {
-      html += '<div class="division-item" style="margin-top:8px"><strong>🦞 龙虾 负责:</strong><br>' + renderMarkdown(data.division.lobster) + '</div>';
-    }
-    if (data.division.codex) {
-      html += '<div class="division-item" style="margin-top:8px"><strong>🟢 Codex 负责:</strong><br>' + renderMarkdown(data.division.codex) + '</div>';
+    for (const agent of data.agents || []) {
+      if (!data.division[agent.id]) continue;
+      html += '<div class="division-item" style="margin-top:8px"><strong>'
+        + escapeHtml(agent.label || agent.id) + ' 负责:</strong><br>'
+        + renderMarkdown(data.division[agent.id]) + '</div>';
     }
     const peerFeedback = data.peer_feedback || {};
     const peerStates = peerFeedback.states || {};
     const needsReview = data.phase === "awaiting_feedback" || data.division_status === "needs_user";
-    if (needsReview && (peerFeedback.claude || peerFeedback.lobster)) {
+    const reviewingAgents = (data.agents || []).filter((agent) => peerFeedback[agent.id]);
+    if (needsReview && reviewingAgents.length) {
       html += '<div class="division-review"><strong>⚠️ 分歧/待裁决:</strong>';
-      if (peerFeedback.claude) {
-        html += '<div style="margin-top:6px"><span>🔵 Claude: ' + escapeHtml(peerStates.claude || "unknown") + '</span><br>' + renderMarkdown(peerFeedback.claude) + '</div>';
-      }
-      if (peerFeedback.lobster) {
-        html += '<div style="margin-top:6px"><span>🦞 龙虾: ' + escapeHtml(peerStates.lobster || "unknown") + '</span><br>' + renderMarkdown(peerFeedback.lobster) + '</div>';
+      for (const agent of reviewingAgents) {
+        html += '<div style="margin-top:6px"><span>' + escapeHtml(agent.label || agent.id) + ': '
+          + escapeHtml(peerStates[agent.id] || "unknown") + '</span><br>'
+          + renderMarkdown(peerFeedback[agent.id]) + '</div>';
       }
       html += '</div>';
     }
@@ -270,11 +313,11 @@ function handlePhaseChange(newPhase, prevPhase) {
   if (newPhase === "pending_confirmation" || newPhase === "awaiting_feedback") {
     elConfirmBar.style.display = "flex";
     if (newPhase === "awaiting_feedback") {
-      elConfirmText.textContent = "三方未达成一致：输入你的裁决/修改意见，或选择下一步。";
+      elConfirmText.textContent = "参与 Agent 未达成一致：输入裁决/修改意见，或选择下一步。";
       elBtnConfirm.textContent = "✅ 仍确认执行";
-      elTaskInput.placeholder = "写给三方的补充意见，例如：按龙虾意见改，Claude 只负责合成，Codex 负责检查…";
+      elTaskInput.placeholder = "写给参与 Agent 的补充意见…";
     } else {
-      elConfirmText.textContent = "三方已同意分工：可确认执行，也可输入修改意见。";
+      elConfirmText.textContent = "Agent 分工已准备：可确认执行，也可输入修改意见。";
       elBtnConfirm.textContent = "✅ 确认执行";
       elTaskInput.placeholder = "可选：输入修改意见后点“按输入修改”…";
     }
@@ -286,21 +329,15 @@ function handlePhaseChange(newPhase, prevPhase) {
   }
   // 进入工作阶段 → 清空面板
   if (newPhase === "ai_working" && prevPhase !== "negotiating") {
-    elClaudeOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
-    elLobsterOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
-    elCodexOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
+    setAllAgentPlaceholders("⏳ 正在分析任务…");
   }
   if (newPhase === "negotiating") {
-    elClaudeOutput.innerHTML = '<div class="placeholder">🤝 正在协商分工…</div>';
-    elLobsterOutput.innerHTML = '<div class="placeholder">🤝 正在协商分工…</div>';
-    elCodexOutput.innerHTML = '<div class="placeholder">🤝 正在协商分工…</div>';
+    setAllAgentPlaceholders("🤝 正在协商分工…");
   }
   // 进入执行阶段 → 清空确认栏，显示执行中
   if (newPhase === "executing") {
     elConfirmBar.style.display = "none";
-    elClaudeOutput.innerHTML = '<div class="placeholder">🔨 正在执行任务…</div>';
-    elLobsterOutput.innerHTML = '<div class="placeholder">🔨 正在执行任务…</div>';
-    elCodexOutput.innerHTML = '<div class="placeholder">🔨 正在执行任务…</div>';
+    setAllAgentPlaceholders("🔨 正在执行任务…");
     taskStartTime = Date.now();
     startElapsedTimer();
   }
@@ -315,21 +352,29 @@ function handlePhaseChange(newPhase, prevPhase) {
 }
 
 function updateGatewayIndicators(gws) {
-  elGwCcmr.textContent = gws.ccmr ? "🔵 ccmr ●" : "🔵 ccmr ○";
-  elGwCcmr.className = "gw-indicator " + (gws.ccmr ? "online" : "offline");
-  elGwLobster.textContent = gws.openclaw ? "🦞 龙虾 ●" : "🦞 龙虾 ○";
-  elGwLobster.className = "gw-indicator " + (gws.openclaw ? "online" : "offline");
-  elGwCodex.textContent = gws.codex ? "🟢 Codex ●" : "🟢 Codex ○";
-  elGwCodex.className = "gw-indicator " + (gws.codex ? "online" : "offline");
+  if (!elGatewayIndicators) return;
+  elGatewayIndicators.replaceChildren();
+  for (const agent of state.agents || []) {
+    const key = agent.gateway || agent.id;
+    const online = Boolean(gws && gws[key]);
+    const indicator = createElement(
+      "span",
+      "gw-indicator " + (online ? "online" : "offline"),
+      `${agent.label || agent.id} ${online ? "●" : "○"}`,
+    );
+    indicator.title = `${agent.provider || key} ${online ? "available" : "unavailable"}`;
+    elGatewayIndicators.append(indicator);
+  }
 }
 
 function updateStatusBadges(data) {
-  elClaudeStatus.textContent = STATUS_LABELS[data.claude_status] || data.claude_status;
-  elClaudeStatus.dataset.status = data.claude_status;
-  elLobsterStatus.textContent = STATUS_LABELS[data.lobster_status] || data.lobster_status;
-  elLobsterStatus.dataset.status = data.lobster_status;
-  elCodexStatus.textContent = STATUS_LABELS[data.codex_status] || data.codex_status;
-  elCodexStatus.dataset.status = data.codex_status;
+  for (const agent of data.agents || []) {
+    const view = agentViews.get(agent.id);
+    if (!view) continue;
+    const status = agent.status || "idle";
+    view.status.textContent = STATUS_LABELS[status] || status;
+    view.status.dataset.status = status;
+  }
 }
 
 function updateSupervisorStatus(data) {
@@ -382,43 +427,29 @@ function startElapsedTimer() {
     const sec = Math.floor((Date.now() - taskStartTime) / 1000);
     const m = Math.floor(sec / 60), s = sec % 60;
     const t = `⏱ ${m}:${String(s).padStart(2, "0")}`;
-    elClaudeElapsed.textContent = t;
-    elLobsterElapsed.textContent = t;
-    elCodexElapsed.textContent = t;
+    for (const view of agentViews.values()) view.elapsed.textContent = t;
   }, 1000);
 }
 
 function stopElapsedTimer() {
   if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
   taskStartTime = null;
-  elClaudeElapsed.textContent = "";
-  elLobsterElapsed.textContent = "";
-  elCodexElapsed.textContent = "";
+  for (const view of agentViews.values()) view.elapsed.textContent = "";
 }
 
 function renderAIPanels(messages) {
-  let latestClaude = null, latestLobster = null, latestCodex = null;
+  const latestByAgent = new Map();
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (m.role === "claude" && !latestClaude) latestClaude = m;
-    if (m.role === "lobster" && !latestLobster) latestLobster = m;
-    if (m.role === "codex" && !latestCodex) latestCodex = m;
-    if (latestClaude && latestLobster && latestCodex) break;
+    if (agentViews.has(m.role) && !latestByAgent.has(m.role)) latestByAgent.set(m.role, m);
+    if (latestByAgent.size === agentViews.size) break;
   }
-  if (latestClaude && latestClaude.id !== lastClaudeMsgIdx) {
-    elClaudeOutput.innerHTML = renderMarkdown(latestClaude.content);
-    elClaudeOutput.scrollTop = 0;
-    lastClaudeMsgIdx = latestClaude.id;
-  }
-  if (latestLobster && latestLobster.id !== lastLobsterMsgIdx) {
-    elLobsterOutput.innerHTML = renderMarkdown(latestLobster.content);
-    elLobsterOutput.scrollTop = 0;
-    lastLobsterMsgIdx = latestLobster.id;
-  }
-  if (latestCodex && latestCodex.id !== lastCodexMsgIdx) {
-    elCodexOutput.innerHTML = renderMarkdown(latestCodex.content);
-    elCodexOutput.scrollTop = 0;
-    lastCodexMsgIdx = latestCodex.id;
+  for (const [agentId, message] of latestByAgent.entries()) {
+    if (lastAgentMessageIds.get(agentId) === message.id) continue;
+    const view = agentViews.get(agentId);
+    view.output.innerHTML = renderMarkdown(message.content);
+    view.output.scrollTop = 0;
+    lastAgentMessageIds.set(agentId, message.id);
   }
 }
 
@@ -432,9 +463,10 @@ function renderMessages(messages) {
     const div = document.createElement("div");
     div.className = `chat-msg role-${m.role}`;
 
+    const agent = (state.agents || []).find((item) => item.id === m.role);
     const roleLabel = {
-      user: "👤 用户", claude: "🔵 Claude", lobster: "🦞 龙虾", codex: "🟢 Codex", system: "⚙ 系统",
-    }[m.role] || m.role;
+      user: "👤 用户", codex: "🟢 Codex", system: "⚙ 系统",
+    }[m.role] || (agent ? agent.label : m.role);
 
     const time = m.timestamp ? m.timestamp.slice(11, 16) : "";
     div.innerHTML = `
@@ -494,7 +526,8 @@ elBtnSend.addEventListener("click", async () => {
   if (!text) return;
   const needsDivision = document.getElementById("chk-division").checked;
   const allowPaidAgents = document.getElementById("chk-paid-agents").checked;
-  if (allowPaidAgents && !confirm("这会同时调用 Claude、龙虾和 Codex，可能消耗 API 额度。确认继续？")) {
+  const agentNames = (state.agents || []).map((agent) => agent.label || agent.id).join("、");
+  if (allowPaidAgents && !confirm(`这会调用 ${agentNames || "当前 Agent"}，可能消耗模型额度。确认继续？`)) {
     return;
   }
   if (await submitTask(text, needsDivision, allowPaidAgents)) {
@@ -503,9 +536,7 @@ elBtnSend.addEventListener("click", async () => {
     if (allowPaidAgents) {
       taskStartTime = Date.now();
       startElapsedTimer();
-      elClaudeOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
-      elLobsterOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
-      elCodexOutput.innerHTML = '<div class="placeholder">⏳ 正在分析任务…</div>';
+      setAllAgentPlaceholders("⏳ 正在分析任务…");
     }
     fetchState();
   }
@@ -539,9 +570,7 @@ elBtnRenegotiate.addEventListener("click", async () => {
   if (await triggerNegotiate(feedback)) {
     lastMsgCount = 0;
     elTaskInput.value = "";
-    elClaudeOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
-    elLobsterOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
-    elCodexOutput.innerHTML = '<div class="placeholder">🤝 重新协商中…</div>';
+    setAllAgentPlaceholders("🤝 重新协商中…");
     taskStartTime = Date.now();
     startElapsedTimer();
     fetchState();
@@ -563,11 +592,6 @@ if (elBtnLoopScan) elBtnLoopScan.addEventListener("click", triggerLoopScan);
 elTaskInput.addEventListener("keydown", (e) => {
   if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); elBtnSend.click(); }
 });
-
-// 模型切换
-elClaudeModel.addEventListener("change", () => setModel("claude", elClaudeModel.value));
-elLobsterModel.addEventListener("change", () => setModel("lobster", elLobsterModel.value));
-elCodexModel.addEventListener("change", () => setModel("codex", elCodexModel.value));
 
 function setMapExpanded(expanded) {
   if (!elStarMapWindow || !elBtnMapExpand) return;
@@ -614,7 +638,7 @@ if (location.hash === "#star-map") {
 // === 启动 ===
 initEnergyFieldCanvas();
 fetchState().finally(scheduleStatePoll);
-console.log("⚡ Duo Hub 三方前端已就绪");
+console.log("⚡ Duo Hub 动态 Agent 前端已就绪");
 
 function initGraphCanvas() {
   if (!elGraphCanvas) return;
@@ -977,10 +1001,9 @@ function initEnergyFieldCanvas() {
   const pointers = new Map();
   const semanticNodes = [
     { key: "user", symbol: "Th", label: "天火需求", type: "REQUEST", color: "#f8fafc", glow: "#a5f3fc", lane: 0, phase: 0.12, weight: 1.12, metric: "INPUT VECTOR" },
-    { key: "claude", symbol: "Cl", label: "Claude", type: "CODE", color: "#dbeafe", glow: "#3b82f6", lane: 1, phase: 0.92, weight: 1.05, metric: "EXECUTOR" },
-    { key: "lobster", symbol: "Lb", label: "龙虾", type: "OPS", color: "#ffedd5", glow: "#f59e0b", lane: 1, phase: 2.18, weight: 1.05, metric: "EXTERNAL" },
+    { key: "gemini", symbol: "Gm", label: "Gemini", type: "AGENT", color: "#ede9fe", glow: "#8b5cf6", lane: 1, phase: 0.92, weight: 1.05, metric: "EXECUTOR" },
     { key: "codex", symbol: "Cx", label: "Codex", type: "COORD", color: "#dcfce7", glow: "#22c55e", lane: 1, phase: 3.46, weight: 1.05, metric: "VERIFIER" },
-    { key: "memory", symbol: "Mm", label: "共享记忆", type: "MEMORY", color: "#f5f3ff", glow: "#a78bfa", lane: 2, phase: 4.12, weight: 0.94, metric: "PERSIST" },
+    { key: "events", symbol: "Ev", label: "事件日志", type: "EVENTS", color: "#f5f3ff", glow: "#a78bfa", lane: 2, phase: 4.12, weight: 0.94, metric: "PERSIST" },
     { key: "tasks", symbol: "Tq", label: "任务队列", type: "TASKS", color: "#e0f2fe", glow: "#38bdf8", lane: 2, phase: 5.12, weight: 0.9, metric: "QUEUE" },
     { key: "division", symbol: "Dv", label: "协商分工", type: "PROTOCOL", color: "#fef9c3", glow: "#eab308", lane: 2, phase: 0.72, weight: 0.92, metric: "NEGOTIATE" },
     { key: "investment", symbol: "Iv", label: "投资学习", type: "LEARN", color: "#ccfbf1", glow: "#14b8a6", lane: 3, phase: 1.56, weight: 0.86, metric: "MARKET" },
@@ -990,10 +1013,10 @@ function initEnergyFieldCanvas() {
     { key: "telegram", symbol: "Tg", label: "TG 桥", type: "BRIDGE", color: "#dbeafe", glow: "#0ea5e9", lane: 3, phase: 5.76, weight: 0.76, metric: "CHANNEL" },
   ];
   const semanticLinks = [
-    ["user", "claude"], ["user", "lobster"], ["user", "codex"],
-    ["codex", "division"], ["division", "claude"], ["division", "lobster"],
-    ["memory", "tasks"], ["memory", "log"], ["investment", "strategy"],
-    ["codex", "github"], ["tasks", "telegram"], ["codex", "memory"],
+    ["user", "gemini"], ["user", "codex"],
+    ["codex", "division"], ["division", "gemini"],
+    ["events", "tasks"], ["events", "log"], ["investment", "strategy"],
+    ["codex", "github"], ["tasks", "telegram"], ["codex", "events"],
   ];
   const core = {
     x: 0,
@@ -1519,9 +1542,9 @@ function initEnergyFieldCanvas() {
   }
 
   function nodeStatus(node) {
-    if (node.key === "claude") return state.claude_status || "idle";
-    if (node.key === "lobster") return state.lobster_status || "idle";
-    if (node.key === "codex") return state.codex_status || "idle";
+    const agent = (state.agents || []).find((item) => item.id === node.key);
+    if (agent) return agent.status || "idle";
+    if (node.key === "codex") return "supervisor";
     if (node.key === "tasks") return state.phase || "idle";
     if (node.key === "division") return state.division_status || "stable";
     if (node.key === "github") return state.version || "0.5.12";
@@ -1878,11 +1901,13 @@ function initEnergyFieldCanvas() {
 
   function drawExpandedConsole(positions, now) {
     if (!isExpandedMap() || width < 760) return;
-    const agentRows = [
-      { key: "CLAUDE", value: state.claude_status || "idle", color: "#3b82f6", level: state.claude_status === "working" ? 0.92 : 0.68 },
-      { key: "LOBSTER", value: state.lobster_status || "idle", color: "#f59e0b", level: state.lobster_status === "working" ? 0.88 : 0.62 },
-      { key: "CODEX", value: state.codex_status || "idle", color: "#22c55e", level: state.codex_status === "working" ? 0.94 : 0.72 },
-    ];
+    const agentRows = (state.agents || []).map((agent) => ({
+      key: String(agent.label || agent.id).toUpperCase(),
+      value: agent.status || "idle",
+      color: agent.color || "#38bdf8",
+      level: agent.status === "working" ? 0.92 : 0.68,
+    }));
+    agentRows.push({ key: "CODEX", value: "supervisor", color: "#22c55e", level: 0.72 });
     const protocolRows = [
       { key: "PHASE", value: state.phase || "idle", color: "#38bdf8", level: 0.76 },
       { key: "ROUND", value: state.round || 0, color: "#a78bfa", level: Math.min(1, (state.round || 1) / 16) },

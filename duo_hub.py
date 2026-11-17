@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-"""
-Duo Hub — 三AI协作中心
-一键启动，让 Claude Code、龙虾(OpenClaw) 和 Codex 同时看到你的需求并协商分工
-"""
+"""Duo Hub — Codex 主管与可插拔 Agent 协作中心。"""
 
+import hashlib
 import http.server
 import json
 import os
@@ -22,6 +20,14 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+from duohub.agents import (
+    AgentDescriptor,
+    AgentRegistry,
+    AgentRequest,
+    AntigravityCliAdapter,
+    GeminiCliAdapter,
+)
+
 # ============================================================
 # 配置 — 从 config.json 读取，支持环境变量覆盖
 # ============================================================
@@ -29,7 +35,7 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
 FAST_AI_TIMEOUT = int(os.environ.get("DUO_FAST_AI_TIMEOUT", "90"))
-APP_VERSION = "0.5.16"
+APP_VERSION = "0.6.0"
 GATEWAY_CACHE_TTL = int(os.environ.get("DUO_GATEWAY_CACHE_TTL", "30"))
 GATEWAY_CHECK_TIMEOUT = float(os.environ.get("DUO_GATEWAY_CHECK_TIMEOUT", "1"))
 REQUEST_BODY_TIMEOUT = float(os.environ.get("DUO_REQUEST_BODY_TIMEOUT", "5"))
@@ -81,13 +87,17 @@ def _load_config():
     else:
         PROTOCOL_DIR = Path.home() / ".duo_hub" / "protocol"
 
-    # Claude 工作区
+    # Claude 工作区（停用兼容配置，未来可重新注册 Adapter）
     claude_ws = os.environ.get("DUO_CLAUDE_WORKSPACE", config.get("claude_workspace", ""))
     CLAUDE_WORKSPACE = Path(claude_ws) if claude_ws else Path.cwd()
 
     # Codex 工作区
     codex_ws = os.environ.get("DUO_CODEX_WORKSPACE", config.get("codex_workspace", ""))
     CODEX_WORKSPACE = Path(codex_ws) if codex_ws else Path.cwd()
+
+    # 当前 Gemini 席位工作区。默认跟随 Codex 工作区，不继承旧 Claude 路径。
+    gemini_ws = os.environ.get("DUO_GEMINI_WORKSPACE", config.get("gemini_workspace", ""))
+    GEMINI_WORKSPACE = Path(gemini_ws) if gemini_ws else CODEX_WORKSPACE
 
     # Web 目录
     WEB_DIR = Path(__file__).parent / "web"
@@ -96,30 +106,70 @@ def _load_config():
     CCMR_PORT = int(os.environ.get("DUO_CCMR_PORT", config.get("ccmr_port", "18080")))
     OPENCLAW_PORT = int(os.environ.get("DUO_OPENCLAW_PORT", config.get("openclaw_port", "18789")))
 
-    return PROTOCOL_DIR, CLAUDE_WORKSPACE, CODEX_WORKSPACE, WEB_DIR, CCMR_PORT, OPENCLAW_PORT
+    return (
+        PROTOCOL_DIR,
+        CLAUDE_WORKSPACE,
+        CODEX_WORKSPACE,
+        GEMINI_WORKSPACE,
+        WEB_DIR,
+        CCMR_PORT,
+        OPENCLAW_PORT,
+        config,
+    )
 
-PROTOCOL_DIR, CLAUDE_WORKSPACE, CODEX_WORKSPACE, WEB_DIR, CCMR_PORT, OPENCLAW_PORT = _load_config()
+(
+    PROTOCOL_DIR,
+    CLAUDE_WORKSPACE,
+    CODEX_WORKSPACE,
+    GEMINI_WORKSPACE,
+    WEB_DIR,
+    CCMR_PORT,
+    OPENCLAW_PORT,
+    CONFIG,
+) = _load_config()
 
 INBOX_FILE = PROTOCOL_DIR / "inbox" / "current_task.txt"
 OUTBOX_CLAUDE = PROTOCOL_DIR / "outbox" / "claude.md"
 OUTBOX_LOBSTER = PROTOCOL_DIR / "outbox" / "lobster.md"
 OUTBOX_CODEX = PROTOCOL_DIR / "outbox" / "codex.md"
+OUTBOX_GEMINI = PROTOCOL_DIR / "outbox" / "gemini.md"
 SESSION_FILE = PROTOCOL_DIR / "session.json"
 CHAT_FILE = PROTOCOL_DIR / "chat.json"
+EVENTS_FILE = PROTOCOL_DIR / "events.jsonl"
 LOOP_STATE_FILE = PROTOCOL_DIR / "loop_state.json"
 LOOP_REPORT_FILE = PROTOCOL_DIR / "loop_report.md"
 
-AI_ORDER = ("claude", "lobster", "codex")
-SUPERVISOR_TARGETS = AI_ORDER
+DEFAULT_AGENT_SETTINGS = (
+    {
+        "id": "gemini",
+        "enabled": True,
+        "invoke_by_default": True,
+        "provider": "antigravity-cli",
+        "model": "gemini-4-hydrogen-medium",
+    },
+)
+AGENT_SETTINGS = tuple(CONFIG.get("agents") or DEFAULT_AGENT_SETTINGS)
+AI_ORDER = tuple(
+    str(item.get("id", "")).strip()
+    for item in AGENT_SETTINGS
+    if item.get("enabled", True) and item.get("invoke_by_default", True) and item.get("id")
+)
+SUPERVISOR_TARGETS = tuple(
+    str(item.get("id", "")).strip()
+    for item in AGENT_SETTINGS
+    if item.get("enabled", True) and item.get("id")
+)
 TERMINAL_STATUSES = ("done", "timeout", "error")
 AI_LABELS = {
     "user": "用户",
+    "gemini": "Gemini",
     "claude": "Claude Code",
     "lobster": "龙虾 (OpenClaw)",
     "codex": "Codex",
     "system": "系统",
 }
 OUTBOX_FILES = {
+    "gemini": OUTBOX_GEMINI,
     "claude": OUTBOX_CLAUDE,
     "lobster": OUTBOX_LOBSTER,
     "codex": OUTBOX_CODEX,
@@ -232,6 +282,19 @@ _codex_candidates = [
 ]
 CODEX_CMD = _find_tool("codex.cmd", "DUO_CODEX_CMD", _codex_candidates)
 
+# Gemini 席位可以选择 Google Gemini CLI 或 Antigravity CLI provider。
+_gemini_candidates = [
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "gemini.cmd"),
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "gemini.exe"),
+    str(Path.home() / "AppData" / "Roaming" / "npm" / "gemini.ps1"),
+]
+GEMINI_CMD = _find_tool("gemini.cmd", "DUO_GEMINI_CMD", _gemini_candidates)
+
+_antigravity_candidates = [
+    str(Path.home() / "AppData" / "Local" / "agy" / "bin" / "agy.exe"),
+]
+ANTIGRAVITY_CMD = _find_tool("agy.exe", "DUO_ANTIGRAVITY_CMD", _antigravity_candidates)
+
 
 def _cmd_parts(cmd):
     path = Path(cmd)
@@ -268,7 +331,8 @@ _ENV = os.environ.copy()
 _ensure_local_no_proxy(_ENV)
 _npm_bin = str(Path.home() / "AppData" / "Roaming" / "npm")
 _pnpm_bin = str(Path.home() / "AppData" / "Local" / "pnpm")
-_ENV["PATH"] = os.pathsep.join([_npm_bin, _pnpm_bin, _ENV.get("PATH", "")])
+_agy_bin = str(Path.home() / "AppData" / "Local" / "agy" / "bin")
+_ENV["PATH"] = os.pathsep.join([_npm_bin, _pnpm_bin, _agy_bin, _ENV.get("PATH", "")])
 
 # OpenClaw NODE_PATH（自动检测）
 _oc_node_paths = []
@@ -283,6 +347,48 @@ for _base in (
 if _oc_node_paths:
     _oc_path = os.pathsep.join(_oc_node_paths)
     _ENV["NODE_PATH"] = _oc_path + os.pathsep + _ENV.get("NODE_PATH", "")
+
+
+def _build_agent_registry():
+    """Build enabled logical seats from config without hard-coding orchestration loops."""
+    registry = AgentRegistry()
+    for settings in AGENT_SETTINGS:
+        if not settings.get("enabled", True):
+            continue
+        agent_id = str(settings.get("id", "")).strip()
+        if agent_id != "gemini":
+            # Future adapters can be registered here without changing orchestration code.
+            continue
+        provider = str(settings.get("provider", "antigravity-cli")).strip().lower()
+        if provider == "gemini-cli":
+            adapter_cls = GeminiCliAdapter
+            command = GEMINI_CMD
+        elif provider == "antigravity-cli":
+            adapter_cls = AntigravityCliAdapter
+            command = ANTIGRAVITY_CMD
+        else:
+            raise ValueError(f"unsupported Gemini provider: {provider}")
+        default_model = str(settings.get("model") or adapter_cls.MODELS[0].id)
+        descriptor = AgentDescriptor(
+            id="gemini",
+            display_name="Gemini",
+            provider=provider,
+            default_model=default_model,
+            models=adapter_cls.MODELS,
+            capabilities=("analysis", "research", "code", "structured-output"),
+            enabled=True,
+            invoke_by_default=bool(settings.get("invoke_by_default", True)),
+            gateway_key="gemini",
+            icon="Gm",
+            color="#8b5cf6",
+        )
+        registry.register(adapter_cls(
+            descriptor=descriptor,
+            command=command,
+            workspace=GEMINI_WORKSPACE,
+            env=_ENV,
+        ))
+    return registry
 
 
 def _claude_gateway_env(model_id):
@@ -421,10 +527,13 @@ def _is_heartbeat_task(task_text):
 class DuoHub:
     def __init__(self):
         self.lock = threading.Lock()
+        self._event_lock = threading.Lock()
         self._gateway_lock = threading.Lock()
         self._collect_lock = threading.Lock()
         self._gateway_cache = None
+        self._agent_health_cache = {}
         self._gateway_cache_at = 0
+        self.agent_registry = _build_agent_registry()
         self._ensure_dirs()
         self._init_session()
         self._init_chat()
@@ -554,11 +663,11 @@ class DuoHub:
                     "severity": "warn",
                     "area": "gateway",
                     "message": f"{name} 当前离线",
-                    "next": "使用一键启动器重启 Duo Hub/ccmr/OpenClaw 网关，再重新扫描。",
+                    "next": "检查该 Agent provider 的安装、登录与命令路径，再重新扫描。",
                 })
 
         if phase in ("ai_working", "negotiating", "executing"):
-            next_actions.append("当前有三方任务在运行，先等待完成或用“重置会话”停止后再推进下一轮。")
+            next_actions.append("当前有 Agent 任务在运行，先等待完成或用“重置会话”停止后再推进下一轮。")
         elif phase == "pending_confirmation":
             findings.append({
                 "severity": "action",
@@ -570,11 +679,11 @@ class DuoHub:
             findings.append({
                 "severity": "action",
                 "area": "division",
-                "message": "三方分工存在分歧，已暂停自动协商",
+                "message": "参与 Agent 对分工存在分歧，已暂停自动协商",
                 "next": "给出裁决意见，或限制协商轮次后重新触发协商。",
             })
         elif phase in ("idle", "awaiting_user", "done"):
-            next_actions.append("系统空闲，可提交任务；默认不会调用付费 Agent，除非勾选启用三方调用。")
+            next_actions.append("系统空闲，可提交任务；默认不会调用模型，除非勾选启用 Agent 调用。")
 
         for ai, status in agent_statuses.items():
             if status == "working":
@@ -655,33 +764,31 @@ class DuoHub:
         self._save_session()
 
     def _new_session(self):
-        return {
+        session = {
             "session_id": f"dh_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             "phase": "idle",
             "round": 0,
-            "claude_status": "idle",
-            "lobster_status": "idle",
-            "codex_status": "idle",
-            "claude_model": DEFAULT_CLAUDE_MODEL,
-            "lobster_model": DEFAULT_LOBSTER_MODEL,
-            "codex_model": "",
+            "event_seq": 0,
             "active_task_id": None,
             "created_at": datetime.now().isoformat(),
         }
+        for adapter in self.agent_registry.enabled():
+            agent_id = adapter.descriptor.id
+            session[f"{agent_id}_status"] = "idle"
+            session[f"{agent_id}_model"] = adapter.descriptor.default_model
+        return session
 
     def _normalize_session(self):
-        """兼容旧的双人 session，补齐三方状态字段。"""
+        """Migrate legacy sessions to the currently enabled registry seats."""
         self.session.setdefault("phase", "idle")
         self.session.setdefault("round", 0)
+        self.session.setdefault("event_seq", 0)
         self.session.setdefault("active_task_id", None)
         self.session.setdefault("created_at", datetime.now().isoformat())
-        self.session.setdefault("claude_model", DEFAULT_CLAUDE_MODEL)
-        self.session["claude_model"] = self._normalize_claude_model_id(self.session.get("claude_model"))
-        self.session.setdefault("lobster_model", DEFAULT_LOBSTER_MODEL)
-        self.session["lobster_model"] = self._normalize_lobster_model_id(self.session.get("lobster_model"))
-        self.session.setdefault("codex_model", "")
-        for ai in AI_ORDER:
-            self.session.setdefault(f"{ai}_status", "idle")
+        for adapter in self.agent_registry.enabled():
+            agent_id = adapter.descriptor.id
+            self.session.setdefault(f"{agent_id}_status", "idle")
+            self.session.setdefault(f"{agent_id}_model", adapter.descriptor.default_model)
 
     @staticmethod
     def _normalize_lobster_model_id(model):
@@ -755,17 +862,18 @@ class DuoHub:
             return self._gateway_cache
 
         if not self._gateway_lock.acquire(blocking=False):
-            return self._gateway_cache or {"ccmr": False, "openclaw": False, "codex": False}
+            return self._gateway_cache or {agent_id: False for agent_id in SUPERVISOR_TARGETS}
 
         try:
             now = time.time()
             if self._gateway_cache and now - self._gateway_cache_at < GATEWAY_CACHE_TTL:
                 return self._gateway_cache
 
+            agent_health = self.agent_registry.health()
+            self._agent_health_cache = agent_health
             self._gateway_cache = {
-                "ccmr": self._port_open(CCMR_PORT),
-                "openclaw": self._port_open(OPENCLAW_PORT),
-                "codex": self._codex_available(),
+                agent_id: bool(health.get("available"))
+                for agent_id, health in agent_health.items()
             }
             self._gateway_cache_at = now
             return self._gateway_cache
@@ -803,7 +911,7 @@ class DuoHub:
     def _next_msg_id(self):
         return f"msg_{len(self.chat['messages']) + 1:04d}"
 
-    def add_message(self, role, content):
+    def add_message(self, role, content, metadata=None):
         msg = {
             "id": self._next_msg_id(),
             "role": role,
@@ -811,9 +919,34 @@ class DuoHub:
             "timestamp": datetime.now().isoformat(),
             "round": self.session["round"],
         }
+        if metadata:
+            msg["metadata"] = metadata
         self.chat["messages"].append(msg)
         self._save_chat()
         return msg
+
+    def append_event(self, event_type, actor, content, metadata=None):
+        """Append one visible, auditable event. Secrets and hidden reasoning are never added."""
+        with self._event_lock:
+            seq = int(self.session.get("event_seq", 0)) + 1
+            self.session["event_seq"] = seq
+            event = {
+                "event_id": f"{self.session['session_id']}_{seq:06d}",
+                "session_id": self.session["session_id"],
+                "seq": seq,
+                "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                "event_type": event_type,
+                "actor": actor,
+                "recorded_by": "duo-hub",
+                "content": content,
+                "content_hash": hashlib.sha256((content or "").encode("utf-8")).hexdigest(),
+                "metadata": metadata or {},
+            }
+            EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(EVENTS_FILE, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            self._save_session()
+            return event
 
     def get_recent_messages(self, n=20):
         return self.chat["messages"][-n:]
@@ -828,14 +961,16 @@ class DuoHub:
                 role_label = AI_LABELS.get(m["role"], m["role"])
                 ctx += f"**{role_label}**: {_truncate_text(m['content'])}\n\n"
 
+        participants = "、".join(AI_LABELS[ai] for ai in AI_ORDER) or "当前已注册 Agent"
+        division_example = "\n".join(f"- {AI_LABELS[ai]}负责：xxx" for ai in AI_ORDER)
         header = (
             "# Duo Hub 协作任务\n\n"
-            "你正在三AI协作中心工作，搭档是 Claude Code、OpenClaw「龙虾」和 Codex。"
-            "用户通过 Duo Hub 同时与你们三个交互。\n\n"
+            f"你正在 Duo Hub 协作中心工作。当前启用的 Agent：{participants}。"
+            "用户通过 Duo Hub 与当前 Agent 交互。\n\n"
             "工作规则：\n"
             "1. 分析任务需求，给出你的方案\n"
             "2. 标注你擅长的部分和需要对方配合的部分\n"
-            "3. 如果是协商，请明确提出三方分工建议（格式：- XX负责：xxx）\n"
+            f"3. 如果是协商，请按当前 Agent 明确提出分工建议：\n{division_example}\n"
             "4. 回复使用中文，结构清晰\n\n"
             "---\n\n"
             "# 当前任务\n\n"
@@ -876,6 +1011,61 @@ class DuoHub:
             f.write("")
 
     # ---- AI 调用 ----
+    def invoke_gemini(self, task_text, model=None, mode="task"):
+        """Invoke the logical Gemini seat through its configured provider adapter."""
+        adapter = self.agent_registry.get("gemini")
+        try:
+            self.session["gemini_status"] = "working"
+            self.session["_gemini_started"] = time.time()
+            self._save_session()
+            self.clear_outbox("gemini")
+
+            mode_prompts = {
+                "task": "[Duo Hub 分析模式]\n请只分析并回答任务，不执行写入、发布、删除或账号操作。",
+                "negotiate": "[Duo Hub 协商模式]\n请审查 Codex 的分工方案，明确同意或指出需要调整之处。",
+                "execute": "[Duo Hub 执行准备模式]\n请给出可执行方案和产物内容；当前阶段仍禁止直接修改文件。",
+            }
+            prompt = f"{mode_prompts.get(mode, mode_prompts['task'])}\n回复使用中文。\n\n{task_text}"
+            requested_model = model or self.session.get("gemini_model") or adapter.descriptor.default_model
+            self.append_event("agent_prompt", "codex", prompt, {
+                "target": "gemini",
+                "provider": adapter.descriptor.provider,
+                "model": requested_model,
+                "mode": mode,
+            })
+            result = adapter.invoke(AgentRequest(
+                prompt=prompt,
+                model=requested_model,
+                mode=mode,
+                timeout_seconds=AI_TIMEOUT,
+            ))
+            metadata = result.metadata()
+            self.session["_gemini_last_run"] = metadata
+            self.session["gemini_status"] = result.status
+            output = result.output if result.status == "done" else (
+                f"Gemini 调用失败（provider={result.provider}, exit={result.exit_code}）："
+                f"{result.error or '未返回可见错误'}"
+            )
+            with open(OUTBOX_GEMINI, "w", encoding="utf-8") as f:
+                f.write(output)
+            self.append_event("agent_output", "gemini", output, metadata)
+            self._save_session()
+        except Exception as exc:
+            output = f"Gemini 调用出错: {exc}"
+            with open(OUTBOX_GEMINI, "w", encoding="utf-8") as f:
+                f.write(output)
+            self.session["gemini_status"] = "error"
+            self.session["_gemini_last_run"] = {
+                "actor": "gemini",
+                "recorded_by": "duo-hub",
+                "provider": adapter.descriptor.provider,
+                "model": model or adapter.descriptor.default_model,
+                "status": "error",
+                "error": str(exc),
+            }
+            self.append_event("error", "gemini", output, self.session["_gemini_last_run"])
+            self._save_session()
+
     def invoke_claude(self, task_text, model=None, mode="task"):
         """在后台线程中调用 Claude Code — 通过 stdin 传提示词避免命令行截断"""
         try:
@@ -1234,7 +1424,7 @@ class DuoHub:
             return
         text = self.read_outbox(ai)
         if text:
-            self.add_message(ai, text)
+            self.add_message(ai, text, self.session.get(f"_{ai}_last_run", {}))
             self.session[f"_{ai}_collected"] = self.session["round"]
             self._save_session()
 
@@ -1244,15 +1434,17 @@ class DuoHub:
 
     @staticmethod
     def _parse_division_plan(text):
-        """从 Codex 的 Markdown 分工提案中提取三方任务。"""
+        """Extract tasks for whichever logical agents are currently enabled."""
         if not text:
             return None
         plan = {ai: "" for ai in AI_ORDER}
-        aliases = {
+        all_aliases = {
+            "gemini": ["Gemini", "谷歌 Gemini"],
             "claude": ["Claude", "Claude Code", "克劳德"],
             "lobster": ["龙虾", "OpenClaw", "小八", "Lobster"],
             "codex": ["Codex"],
         }
+        aliases = {ai: all_aliases.get(ai, [ai]) for ai in AI_ORDER}
         lines = text.splitlines()
         for idx, line in enumerate(lines):
             stripped = line.strip().lstrip("-*0123456789.、 \t")
@@ -1274,7 +1466,13 @@ class DuoHub:
                                 if extra:
                                     break
                                 continue
-                            if any(token in f for token in ["Claude负责", "Claude 负责", "龙虾负责", "龙虾 负责", "Codex负责", "Codex 负责"]):
+                            markers = [
+                                marker
+                                for alias_names in aliases.values()
+                                for name in alias_names
+                                for marker in (f"{name}负责", f"{name} 负责")
+                            ]
+                            if any(token in f for token in markers):
                                 break
                             if f.startswith(("#", "---")):
                                 break
@@ -1319,6 +1517,7 @@ class DuoHub:
     def _start_agent(self, ai, task_text, mode="task"):
         model = self.session.get(f"{ai}_model", "")
         target = {
+            "gemini": self.invoke_gemini,
             "claude": self.invoke_claude,
             "lobster": self.invoke_lobster,
             "codex": self.invoke_codex,
@@ -1326,7 +1525,7 @@ class DuoHub:
         threading.Thread(target=target, args=(task_text, model, mode), daemon=True).start()
 
     def process_task(self, task_text, needs_division=False, allow_paid_agents=False):
-        """提交任务：只有明确允许时才启动会消耗额度的三方 AI。"""
+        """Submit a task; model calls only run after explicit UI opt-in."""
         if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing", "supervising"):
             return False, "已有任务正在处理中"
 
@@ -1343,10 +1542,9 @@ class DuoHub:
                 self.session[f"{ai}_status"] = "done"
                 self.session[f"_{ai}_collected"] = self.session["round"]
             self._save_session()
-            self.add_message("claude", f"Claude Code 网关状态：{'在线' if gws.get('ccmr') else '离线'}。普通回复已切到 ccmr 轻量路径；需要执行代码时才会进入 Claude Code CLI。")
-            self.add_message("lobster", f"龙虾 / OpenClaw 网关状态：{'在线' if gws.get('openclaw') else '离线'}。心跳检查不再调用模型；真实任务仍按所选模型执行。")
-            self.add_message("codex", f"Codex CLI 状态：{'在线' if gws.get('codex') else '离线'}。Duo Hub 当前版本 {APP_VERSION}。")
-            self.add_message("system", "🩺 连接检查已完成；这次没有调用三方模型。")
+            for ai in AI_ORDER:
+                self.add_message(ai, f"{AI_LABELS[ai]} provider 状态：{'在线' if gws.get(ai) else '离线'}。")
+            self.add_message("system", f"🩺 连接检查已完成；这次没有调用模型。Duo Hub {APP_VERSION}。")
             return True, self.session["active_task_id"]
 
         if not allow_paid_agents:
@@ -1355,7 +1553,8 @@ class DuoHub:
                 self.session[f"{ai}_status"] = "idle"
                 self.session[f"_{ai}_collected"] = self.session["round"]
             self._save_session()
-            self.add_message("system", "已记录这条内容，但未启动 Claude、龙虾或 Codex。要让三方真正分析/执行，请先勾选“启用三方调用”。")
+            names = "、".join(AI_LABELS[ai] for ai in AI_ORDER)
+            self.add_message("system", f"已记录这条内容，但未启动 {names}。要实际调用模型，请先勾选“启用 Agent 调用”。")
             return True, self.session["active_task_id"]
 
         self.session["phase"] = "ai_working"
@@ -1389,7 +1588,7 @@ class DuoHub:
         """Codex 主管按需只委派给一个指定参与方，并把请求/回包展示在 Duo Hub。"""
         target = (target or "").strip().lower()
         if target not in SUPERVISOR_TARGETS:
-            return False, "target 只能是 claude、lobster 或 codex"
+            return False, f"target 只能是：{', '.join(SUPERVISOR_TARGETS)}"
 
         if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing", "supervising"):
             return False, "已有任务正在处理中"
@@ -1430,7 +1629,7 @@ class DuoHub:
         return True, self.session["active_task_id"]
 
     def supervisor_assign(self, assignments, mode="execute"):
-        """Codex 主管一次性下发三方分工：每个参与方只执行分给自己的任务。"""
+        """Codex supervisor assigns work to enabled registry agents."""
         if self.session["phase"] in ("ai_working", "negotiating", "pending_confirmation", "awaiting_feedback", "executing", "supervising"):
             return False, "已有任务正在处理中"
 
@@ -1444,7 +1643,7 @@ class DuoHub:
                 cleaned[ai] = text
 
         if not cleaned:
-            return False, "至少要给 claude、lobster 或 codex 中的一方分配任务"
+            return False, f"至少要给 {', '.join(AI_ORDER)} 中的一方分配任务"
 
         mode = (mode or "execute").strip().lower()
         if mode not in ("task", "negotiate", "execute"):
@@ -1472,7 +1671,7 @@ class DuoHub:
             for ai in AI_ORDER
             if ai in cleaned
         )
-        self.add_message("codex", f"【Codex 主管三方分工】\n{plan_lines}")
+        self.add_message("codex", f"【Codex 主管分工】\n{plan_lines}")
         self.add_message("system", f"🧭 Codex 主管已下发分工：{len(cleaned)} 个参与方并行执行。")
 
         shared_context = self._format_recent(20)
@@ -1483,7 +1682,7 @@ class DuoHub:
                 if other != ai
             )
             prompt = (
-                "## Duo Hub 三方分工执行\n\n"
+                "## Duo Hub Agent 分工执行\n\n"
                 f"你是 {AI_LABELS[ai]}。Codex 主管已经把同一个总任务拆给多个参与方。\n"
                 "你只执行明确分配给你的部分，不要重复执行其他参与方的任务。\n"
                 "如果你的任务需要外部账号动作、发布、删除、交易或敏感数据，必须停止并说明需要用户确认。\n\n"
@@ -1509,7 +1708,7 @@ class DuoHub:
             self._collect_lock.release()
 
     def _check_and_collect_results_locked(self):
-        """检查三个 AI 是否完成，收集结果，自动推进阶段。"""
+        """检查当前注册的 Agent 是否完成，收集结果，自动推进阶段。"""
         phase = self.session["phase"]
 
         now = time.time()
@@ -1543,17 +1742,17 @@ class DuoHub:
                     self._negotiate_peers_respond()
 
             elif stage == "peers_confirm":
-                for ai in ("claude", "lobster"):
+                peer_agents = tuple(ai for ai in AI_ORDER if ai != "codex")
+                for ai in peer_agents:
                     self._collect_if_done(ai)
 
-                if self._all_done(("claude", "lobster")):
+                if peer_agents and self._all_done(peer_agents):
                     peer_states = {
-                        "claude": self._agent_agreement_state(self.read_outbox("claude") or ""),
-                        "lobster": self._agent_agreement_state(self.read_outbox("lobster") or ""),
+                        ai: self._agent_agreement_state(self.read_outbox(ai) or "")
+                        for ai in peer_agents
                     }
                     self.session["_peer_feedback"] = {
-                        "claude": self.read_outbox("claude") or "",
-                        "lobster": self.read_outbox("lobster") or "",
+                        **{ai: self.read_outbox(ai) or "" for ai in peer_agents},
                         "states": peer_states,
                     }
                     peers_agreed = all(state == "agree" for state in peer_states.values())
@@ -1563,7 +1762,7 @@ class DuoHub:
                     if peers_agreed:
                         self.session["phase"] = "pending_confirmation"
                         self.session["_division_status"] = "agreed"
-                        msg = "✅ 三方已一致同意分工。请确认执行，或输入修改意见继续调整。"
+                        msg = "✅ 参与 Agent 已同意分工。请确认执行，或输入修改意见继续调整。"
                         self.add_message("system", msg)
                         self._save_session()
                     elif neg_rounds >= 3:
@@ -1571,7 +1770,7 @@ class DuoHub:
                         self.session["_division_status"] = "needs_user"
                         self.add_message(
                             "system",
-                            "⚠️ 三方未达成一致，已暂停自动协商。请补充你的意见、继续协商、强制确认当前方案，或取消分工。"
+                            "⚠️ 参与 Agent 未达成一致，已暂停自动协商。请补充意见、继续协商、确认当前方案，或取消分工。"
                         )
                         self._save_session()
                     else:
@@ -1583,7 +1782,7 @@ class DuoHub:
 
             if self._all_done():
                 self.session["phase"] = "done"
-                self.add_message("system", "🎉 三方执行完毕！请在面板中查看各自成果。")
+                self.add_message("system", "🎉 Agent 执行完毕！请在面板中查看成果。")
                 self._save_session()
 
         elif phase == "supervising":
@@ -1598,7 +1797,21 @@ class DuoHub:
                 self._save_session()
 
     def _auto_negotiate(self, user_feedback=""):
-        """Codex 先汇总三方初步意见并提出三方分工。"""
+        """Prepare a division for the currently enabled registry agents."""
+        if len(AI_ORDER) == 1:
+            agent_id = AI_ORDER[0]
+            latest_user = next(
+                (msg.get("content", "") for msg in reversed(self.chat.get("messages", [])) if msg.get("role") == "user"),
+                "",
+            )
+            self.session["_division_plan"] = {agent_id: latest_user}
+            self.session["_division_status"] = "single_agent_ready"
+            self.session["_peer_feedback"] = {}
+            self.session["phase"] = "pending_confirmation"
+            self.add_message("system", f"📋 当前只启用 {AI_LABELS[agent_id]}，已生成单 Agent 分工，请确认执行。")
+            self._save_session()
+            return
+
         context_str = self._format_recent(20)
         feedback_block = f"\n\n## 用户的补充意见\n\n{user_feedback}\n" if user_feedback else ""
 
@@ -1613,15 +1826,13 @@ class DuoHub:
         self.session["codex_status"] = "working"
         self._save_session()
 
-        self.add_message("system", "🤝 Codex 正在汇总三方意见，准备提出三方分工…")
+        self.add_message("system", "🤝 Codex 正在汇总参与 Agent 的意见，准备提出分工…")
 
+        plan_format = "\n".join(f"- {AI_LABELS[ai]}负责：[具体、可执行]" for ai in AI_ORDER)
         prompt = (
             "## 协商分工 - Codex 汇总提案\n\n"
-            "请阅读 Claude、龙虾和 Codex 的初步回复，以及用户的补充意见，提出一个明确的三方分工。\n"
-            "必须包含：\n"
-            "- Claude负责：[具体、可执行]\n"
-            "- 龙虾负责：[具体、可执行]\n"
-            "- Codex负责：[具体、可执行]\n"
+            "请阅读参与 Agent 的初步回复和用户补充意见，提出明确分工。\n"
+            f"必须包含：\n{plan_format}\n"
             "规则：责任边界清晰，不重复安排同一件事；如果某方能力明显不适合，就把它安排到更适合的支持/审查/资料任务。\n"
             "回复使用中文。\n\n"
             f"{feedback_block}\n---\n{context_str}"
@@ -1630,27 +1841,28 @@ class DuoHub:
         self._start_agent("codex", prompt, "negotiate")
 
     def _negotiate_peers_respond(self):
-        """Claude 和龙虾并行确认 Codex 的三方分工提案。"""
+        """Enabled non-supervisor agents confirm the proposed division."""
         context_str = self._format_recent(20)
         self.session["_negotiate_stage"] = "peers_confirm"
-        for ai in ("claude", "lobster"):
+        peer_agents = tuple(ai for ai in AI_ORDER if ai != "codex")
+        for ai in peer_agents:
             self.session[f"{ai}_status"] = "working"
             self.session[f"_{ai}_collected"] = 0
         self._save_session()
 
-        self.add_message("system", "🤝 Claude 和龙虾正在确认 Codex 的三方分工提案…")
+        self.add_message("system", f"🤝 {'、'.join(AI_LABELS[ai] for ai in peer_agents)} 正在确认分工提案…")
 
         prompt = (
             "## 协商分工 - 确认或调整\n\n"
-            "Codex 已经提出三方分工方案（见上文）。请只从你的能力边界和执行可行性出发确认或调整：\n"
+            "Codex 已经提出 Agent 分工方案（见上文）。请只从你的能力边界和执行可行性出发确认或调整：\n"
             "- 同意就说「同意分工」，并列出你要执行的任务\n"
             "- 不同意就说明哪一项不可行，并给出替代分工\n"
             "回复使用中文。\n\n"
             f"---\n{context_str}"
         )
         self.write_inbox(prompt)
-        self._start_agent("claude", prompt, "negotiate")
-        self._start_agent("lobster", prompt, "negotiate")
+        for ai in peer_agents:
+            self._start_agent(ai, prompt, "negotiate")
 
     def _negotiate_codex_adjust(self):
         """Claude 或龙虾不同意时，Codex 再整合调整。"""
@@ -1665,12 +1877,13 @@ class DuoHub:
         self.session["codex_status"] = "working"
         self._save_session()
 
-        self.add_message("system", "🤝 Claude 或龙虾提出调整意见，Codex 正在重新整合分工…")
+        self.add_message("system", "🤝 参与 Agent 提出调整意见，Codex 正在重新整合分工…")
 
+        plan_format = "\n".join(f"- {AI_LABELS[ai]}负责：[调整后的任务]" for ai in AI_ORDER)
         prompt = (
             "## 协商 - Codex 调整方案\n\n"
-            "Claude 或龙虾对上轮三方分工提出了不同意见。请吸收合理反馈，重新给出三方分工。\n"
-            "格式：\n- Claude负责：[调整后的任务]\n- 龙虾负责：[调整后的任务]\n- Codex负责：[调整后的任务]\n"
+            "参与 Agent 对上轮分工提出了不同意见。请吸收合理反馈，重新给出分工。\n"
+            f"格式：\n{plan_format}\n"
             "目标是可执行，不追求平均分配。回复使用中文。\n\n"
             f"---\n{context_str}"
         )
@@ -1700,7 +1913,7 @@ class DuoHub:
         return True, "ok"
 
     def confirm_plan(self):
-        """用户确认分工方案 → 三方分别执行。"""
+        """用户确认分工方案后，由当前注册 Agent 分别执行。"""
         if self.session["phase"] not in ("pending_confirmation", "awaiting_feedback"):
             return False, "没有待确认的分工方案"
 
@@ -1711,19 +1924,16 @@ class DuoHub:
             self.session[f"{ai}_status"] = "working"
             self.session[f"_{ai}_collected"] = 0
         if self.session.get("_division_status") == "needs_user":
-            self.add_message("system", "✅ 用户已强制确认当前分工！三方开始执行各自任务…")
+            self.add_message("system", "✅ 用户已强制确认当前分工！参与 Agent 开始执行各自任务…")
         else:
-            self.add_message("system", "✅ 用户已确认分工！三方开始执行各自任务…")
+            self.add_message("system", "✅ 用户已确认分工！参与 Agent 开始执行各自任务…")
         self._save_session()
 
         all_context = self._format_recent(30)
         division_plan = self.session.get("_division_plan") or {}
         shared_task = (
-            "## 执行阶段 - 三方共享上下文\n\n"
-            "分工方案已经用户确认。每个 AI 只执行明确标注给自己的部分：\n"
-            "- Claude 只执行「Claude负责」部分\n"
-            "- 龙虾只执行「龙虾负责」部分\n"
-            "- Codex 只执行「Codex负责」部分\n"
+            "## 执行阶段 - Agent 共享上下文\n\n"
+            "分工方案已经用户确认。每个 Agent 只执行明确标注给自己的部分。\n"
             "不要重复执行别人的任务。完成后报告你具体做了什么。\n\n"
             f"---\n{all_context}"
         )
@@ -1788,29 +1998,17 @@ class DuoHub:
         if division and not any((division.get(ai) or "").strip() for ai in AI_ORDER):
             division = None
 
-        agents = [
-            {
-                "id": ai,
-                "label": AI_LABELS[ai],
-                "status": self.session.get(f"{ai}_status", "idle"),
-                "model": self.session.get(f"{ai}_model", ""),
-            }
-            for ai in AI_ORDER
-        ]
+        agents = self.agent_registry.public_agents(self.session)
 
+        gateways = self.check_gateways()
         return {
             "version": APP_VERSION,
             "session_id": self.session["session_id"],
             "phase": self.session["phase"],
             "round": self.session["round"],
-            "claude_status": self.session["claude_status"],
-            "lobster_status": self.session["lobster_status"],
-            "codex_status": self.session.get("codex_status", "idle"),
-            "claude_model": self._normalize_claude_model_id(self.session.get("claude_model")),
-            "lobster_model": self._normalize_lobster_model_id(self.session.get("lobster_model")),
-            "codex_model": self.session.get("codex_model", ""),
             "active_task_id": self.session.get("active_task_id"),
-            "gateways": self.check_gateways(),
+            "gateways": gateways,
+            "agent_health": self._agent_health_cache,
             "agents": agents,
             "messages": recent,
             "total_messages": len(messages),
@@ -1818,6 +2016,7 @@ class DuoHub:
             "division": division,
             "division_status": self.session.get("_division_status", ""),
             "peer_feedback": self.session.get("_peer_feedback", {}),
+            "event_seq": self.session.get("event_seq", 0),
             "created_at": self.session["created_at"],
         }
 
@@ -2094,29 +2293,24 @@ def main():
             print(*args, **kwargs)
 
     say("=" * 56)
-    say("  ⚡ Duo Hub — 三 AI 协作中心")
+    say("  ⚡ Duo Hub — 可插拔 Agent 协作中心")
     say("=" * 56)
     say()
     say(f"  协议目录: {PROTOCOL_DIR}")
     say(f"  前端文件: {WEB_DIR}")
-    say(f"  Claude 工作区: {CLAUDE_WORKSPACE}")
-    say(f"  Codex 工作区: {CODEX_WORKSPACE}")
+    say(f"  Gemini 工作区: {GEMINI_WORKSPACE}")
     say()
 
     # 检查网关
     say("[检测] 网关状态...")
     gws = hub.check_gateways()
-    ccmr_icon = "[OK]" if gws["ccmr"] else "[XX]"
-    oc_icon = "[OK]" if gws["openclaw"] else "[XX]"
-    codex_icon = "[OK]" if gws["codex"] else "[XX]"
-    say(f"  {ccmr_icon} ccmr 网关 (端口 {CCMR_PORT})")
-    say(f"  {oc_icon} OpenClaw 网关 (端口 {OPENCLAW_PORT})")
-    say(f"  {codex_icon} Codex CLI ({CODEX_CMD})")
+    gemini_icon = "[OK]" if gws["gemini"] else "[XX]"
+    provider = hub.agent_registry.get("gemini").descriptor.provider
+    say(f"  {gemini_icon} Gemini 席位 ({provider})")
     say()
 
-    if not gws["ccmr"] or not gws["openclaw"] or not gws["codex"]:
-        say("[!!] 部分网关未运行，请先启动相应网关")
-        say("     或者使用 launch_duo_hub.cmd 一键启动全部服务")
+    if not gws["gemini"]:
+        say("[!!] 当前 Gemini provider 不可用，请检查本机命令安装")
         say()
 
     # 启动 HTTP 服务器

@@ -2,6 +2,16 @@
   "protocol_dir": "",
   "claude_workspace": "",
   "codex_workspace": "",
+  "gemini_workspace": "",
   "ccmr_port": "18080",
-  "openclaw_port": "18789"
+  "openclaw_port": "18789",
+  "agents": [
+    {
+      "id": "gemini",
+      "enabled": true,
+      "invoke_by_default": true,
+      "provider": "antigravity-cli",
+      "model": "gemini-4-hydrogen-medium"
+    }
+  ]
 }
