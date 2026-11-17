@@ -1,6 +1,6 @@
 # Duo Hub
 
-Duo Hub 是一个本机 Agent 协作看板。当前 `0.6.1` 阶段由 Codex 负责主管调度，只启用一个逻辑席位 `gemini`；默认通过已登录的 Antigravity CLI 调用 Gemini 模型。
+Duo Hub 是一个本机 Agent 协作看板。当前 `0.6.2` 阶段由 Codex 负责主管调度，只启用一个逻辑席位 `gemini`；默认通过已登录的 Antigravity CLI 调用 Gemini 模型。
 
 Claude Code 和 OpenClaw 的旧实现仍保留为兼容代码，但没有注册到当前 Agent Registry，也不会出现在页面或默认调用链中。
 
@@ -142,4 +142,4 @@ node --check .\web\app.js
 node --check .\web\supervisor_status.js
 ```
 
-Phase 1 已完成 Gemini Registry、真实回包、metadata 审计和重启恢复。Phase 2 已完成 POST token、同源/回环限制、安全响应头、provider 进程树取消和旧会话写入隔离。下一阶段对比 Antigravity App/CLI 与 Gemini CLI 的实际操作成本，再决定 Windows App 的默认入口。
+Phase 1 已完成 Gemini Registry、真实回包、metadata 审计和重启恢复。Phase 2 已完成 POST token、同源/回环限制、安全响应头、provider 进程树取消和旧会话写入隔离。Phase 3 的本机实测结论是：Antigravity CLI 当前已认证、可结构化回包且可审计，继续作为默认 provider；Gemini CLI 保留为用户完成认证后的备用入口。详细对比见 `docs/DUO_HUB_GEMINI_ANTIGRAVITY_COMPARISON_2026-11-17.md`。

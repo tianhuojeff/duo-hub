@@ -40,7 +40,7 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
 FAST_AI_TIMEOUT = int(os.environ.get("DUO_FAST_AI_TIMEOUT", "90"))
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.6.2"
 GATEWAY_CACHE_TTL = int(os.environ.get("DUO_GATEWAY_CACHE_TTL", "30"))
 GATEWAY_CHECK_TIMEOUT = float(os.environ.get("DUO_GATEWAY_CHECK_TIMEOUT", "1"))
 REQUEST_BODY_TIMEOUT = float(os.environ.get("DUO_REQUEST_BODY_TIMEOUT", "5"))
@@ -1066,7 +1066,10 @@ class DuoHub:
             self.clear_outbox("gemini")
 
             mode_prompts = {
-                "task": "[Duo Hub 分析模式]\n请只分析并回答任务，不执行写入、发布、删除或账号操作。",
+                "task": (
+                    "[Duo Hub 分析模式]\n请只分析并回答任务，不执行写入、发布、删除或账号操作。"
+                    "这不是实施请求；不要创建实现计划，只返回问题答案和必要证据。"
+                ),
                 "negotiate": "[Duo Hub 协商模式]\n请审查 Codex 的分工方案，明确同意或指出需要调整之处。",
                 "execute": "[Duo Hub 执行准备模式]\n请给出可执行方案和产物内容；当前阶段仍禁止直接修改文件。",
             }
