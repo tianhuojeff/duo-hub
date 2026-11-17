@@ -40,13 +40,23 @@ HOST = "127.0.0.1"
 PORT = int(os.environ.get("DUO_PORT", "5199"))
 AI_TIMEOUT = int(os.environ.get("DUO_AI_TIMEOUT", "300"))
 FAST_AI_TIMEOUT = int(os.environ.get("DUO_FAST_AI_TIMEOUT", "90"))
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.7.0"
 GATEWAY_CACHE_TTL = int(os.environ.get("DUO_GATEWAY_CACHE_TTL", "30"))
 GATEWAY_CHECK_TIMEOUT = float(os.environ.get("DUO_GATEWAY_CHECK_TIMEOUT", "1"))
 REQUEST_BODY_TIMEOUT = float(os.environ.get("DUO_REQUEST_BODY_TIMEOUT", "5"))
 AGENT_CONTEXT_MESSAGES = int(os.environ.get("DUO_AGENT_CONTEXT_MESSAGES", "4"))
 AGENT_CONTEXT_CHARS = int(os.environ.get("DUO_AGENT_CONTEXT_CHARS", "1000"))
 LOCAL_NO_PROXY = ("127.0.0.1", "localhost", "::1")
+
+
+def _resource_root():
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+
+
+def _runtime_root():
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 def _merge_csv_env(existing, additions):
@@ -75,8 +85,18 @@ _ensure_local_no_proxy(os.environ)
 def _load_config():
     """加载配置，优先环境变量，其次 config.local.json/config.json，最后自动检测"""
     config = {}
-    for filename in ("config.json", "config.local.json"):
-        config_file = Path(__file__).parent / filename
+    config_files = (
+        _resource_root() / "config.json",
+        _runtime_root() / "config.json",
+        _resource_root() / "config.local.json",
+        _runtime_root() / "config.local.json",
+    )
+    seen = set()
+    for config_file in config_files:
+        resolved = str(config_file.resolve())
+        if resolved in seen:
+            continue
+        seen.add(resolved)
         if not config_file.exists():
             continue
         try:
@@ -105,7 +125,7 @@ def _load_config():
     GEMINI_WORKSPACE = Path(gemini_ws) if gemini_ws else CODEX_WORKSPACE
 
     # Web 目录
-    WEB_DIR = Path(__file__).parent / "web"
+    WEB_DIR = _resource_root() / "web"
 
     # 网关端口
     CCMR_PORT = int(os.environ.get("DUO_CCMR_PORT", config.get("ccmr_port", "18080")))
@@ -165,7 +185,7 @@ SUPERVISOR_TARGETS = tuple(
     for item in AGENT_SETTINGS
     if item.get("enabled", True) and item.get("id")
 )
-TERMINAL_STATUSES = ("done", "timeout", "error")
+TERMINAL_STATUSES = ("done", "timeout", "error", "cancelled")
 AI_LABELS = {
     "user": "用户",
     "gemini": "Gemini",
@@ -619,7 +639,7 @@ class DuoHub:
         return snapshot
 
     def _repo_snapshot(self):
-        repo = Path(__file__).parent
+        repo = _runtime_root()
         result = {"path": str(repo), "available": False, "dirty": None, "changed": []}
         try:
             proc = subprocess.run(
@@ -2064,6 +2084,22 @@ class DuoHub:
             self.clear_outbox(ai)
         self._save_session()
         self._save_chat()
+
+    def shutdown_active_runs(self):
+        """Cancel provider processes while preserving the current session for the next launch."""
+        run_id = self.session.get("_active_run_id", "")
+        if not run_id:
+            return
+        self.agent_registry.cancel_all(run_id)
+        if self.session.get("_active_run_id") != run_id:
+            return
+        self.session["_active_run_id"] = ""
+        for ai in AI_ORDER:
+            if self.session.get(f"{ai}_status") == "working":
+                self.session[f"{ai}_status"] = "cancelled"
+        self.session["phase"] = "awaiting_user"
+        self.add_message("system", "桌面窗口已关闭，正在运行的 Agent 已取消；会话已保留。")
+        self._save_session()
 
     def get_state(self):
         """获取完整状态（供 API 返回）"""

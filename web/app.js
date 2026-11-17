@@ -48,7 +48,7 @@ let supervisorStatusMounted = false;
 
 const STATUS_LABELS = {
   idle: "空闲", working: "工作中…", done: "✅ 完成",
-  timeout: "⏰ 超时", error: "❌ 错误",
+  timeout: "⏰ 超时", error: "❌ 错误", cancelled: "已取消",
 };
 const PHASE_LABELS = {
   idle: "就绪 — 输入需求开始",

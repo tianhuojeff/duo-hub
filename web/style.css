@@ -407,6 +407,7 @@ body.map-immersive::after {
 .ai-status[data-status="done"]     { background: rgba(16, 185, 129, 0.15); color: var(--success); }
 .ai-status[data-status="timeout"]  { background: rgba(239, 68, 68, 0.15); color: var(--error); }
 .ai-status[data-status="error"]    { background: rgba(239, 68, 68, 0.15); color: var(--error); }
+.ai-status[data-status="cancelled"] { background: rgba(148, 163, 184, 0.15); color: var(--text-dim); }
 
 /* 模型选择框 */
 .model-select {

@@ -2,6 +2,9 @@
 __pycache__/
 *.pyc
 *.pyo
+.venv*/
+build/
+dist/
 
 # IDE
 .idea/

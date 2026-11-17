@@ -1,6 +1,6 @@
 # Duo Hub
 
-Duo Hub 是一个本机 Agent 协作看板。当前 `0.6.2` 阶段由 Codex 负责主管调度，只启用一个逻辑席位 `gemini`；默认通过已登录的 Antigravity CLI 调用 Gemini 模型。
+Duo Hub 是一个本机 Agent 协作看板。当前 `0.7.0` 阶段由 Codex 负责主管调度，只启用一个逻辑席位 `gemini`；默认通过已登录的 Antigravity CLI 调用 Gemini 模型。
 
 Claude Code 和 OpenClaw 的旧实现仍保留为兼容代码，但没有注册到当前 Agent Registry，也不会出现在页面或默认调用链中。
 
@@ -50,6 +50,7 @@ Duo Hub HTTP API
 - Python 3.10+
 - 默认路径：Antigravity CLI 已安装并完成登录
 - 可选路径：Google Gemini CLI 已安装，并已通过 Google 登录、`GEMINI_API_KEY` 或 Vertex AI 完成认证
+- Windows 桌面版：Microsoft Edge WebView2 Runtime；构建依赖见 `requirements-desktop.txt`
 
 当前默认配置不要求 ccmr、Claude Code 或 OpenClaw 网关运行。
 
@@ -72,6 +73,30 @@ $env:DUO_GEMINI_WORKSPACE = (Get-Location).Path
 $env:DUO_NO_BROWSER = "1"
 python .\duo_hub.py
 ```
+
+## Windows 桌面版
+
+桌面版使用 pywebview + Edge WebView2，复用同一套 HTTP API、Agent Registry、事件审计和会话目录，不另写一套业务逻辑。
+
+构建：
+
+```powershell
+.\build_windows_app.ps1
+```
+
+产物为 `dist\DuoHub\DuoHub.exe` 的 `onedir` 目录。运行：
+
+```powershell
+.\launch_duo_hub_app.ps1
+```
+
+也可以双击 `launch_duo_hub.cmd`。需要清理并重建时：
+
+```powershell
+.\launch_duo_hub_app.ps1 -Rebuild
+```
+
+桌面壳只启动一个本机 HTTP 服务；如果 5199 已经是可识别的 Duo Hub，会复用现有服务。关闭由桌面壳启动的最后窗口时，会取消仍在运行的 Agent、关闭服务并保留会话。
 
 ## 配置 Agent provider
 
@@ -140,6 +165,7 @@ python -m compileall -q .\duo_hub.py .\duohub
 python -m unittest discover -s tests -v
 node --check .\web\app.js
 node --check .\web\supervisor_status.js
+.\build_windows_app.ps1
 ```
 
-Phase 1 已完成 Gemini Registry、真实回包、metadata 审计和重启恢复。Phase 2 已完成 POST token、同源/回环限制、安全响应头、provider 进程树取消和旧会话写入隔离。Phase 3 的本机实测结论是：Antigravity CLI 当前已认证、可结构化回包且可审计，继续作为默认 provider；Gemini CLI 保留为用户完成认证后的备用入口。详细对比见 `docs/DUO_HUB_GEMINI_ANTIGRAVITY_COMPARISON_2026-11-17.md`。
+Phase 1 已完成 Gemini Registry、真实回包、metadata 审计和重启恢复。Phase 2 已完成 POST token、同源/回环限制、安全响应头、provider 进程树取消和旧会话写入隔离。Phase 3 选择 Antigravity CLI 为当前默认 provider；Gemini CLI 保留为认证后的备用入口。Phase 4 已完成 pywebview/WebView2 Windows App 与 PyInstaller `onedir` 的构建、交互和退出验收。详细 provider 对比见 `docs/DUO_HUB_GEMINI_ANTIGRAVITY_COMPARISON_2026-11-17.md`。
