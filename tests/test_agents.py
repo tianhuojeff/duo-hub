@@ -92,6 +92,26 @@ class CliAdapterTests(unittest.TestCase):
         self.assertEqual(result.usage["total_tokens"], 12)
         self.assertEqual(result.exit_code, 0)
 
+    def test_antigravity_reports_denied_headless_action(self):
+        payload = (
+            '{"conversation_id":"c-2","status":"SUCCESS","response":"",'
+            '"denied_actions":[{"action":"command","display_name":"Bash"}]}'
+        )
+        runner = FakeRunner(subprocess.CompletedProcess([], 0, payload, ""))
+        adapter = AntigravityCliAdapter(
+            descriptor=descriptor("antigravity-cli"),
+            command="agy.exe",
+            workspace=Path.cwd(),
+            runner=runner,
+        )
+        result = adapter.invoke(self.request())
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(
+            result.error,
+            "Antigravity CLI denied required headless actions: command (Bash)",
+        )
+
     def test_gemini_auth_error_is_not_reported_as_success(self):
         payload = '{"session_id":"s-1","error":{"message":"auth required","code":41}}'
         runner = FakeRunner(subprocess.CompletedProcess([], 41, payload, ""))

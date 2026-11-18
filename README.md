@@ -15,6 +15,7 @@ Claude Code 和 OpenClaw 的旧实现仍保留为兼容代码，但没有注册�
 - 会话恢复：`session.json`、`chat.json`、outbox 和事件序号在服务重启后继续恢复。
 - 动态页面：Agent 面板、模型列表、网关状态、分工状态和聊天角色均按 API 返回的注册表生成。
 - 本机请求保护：所有 POST 必须携带 HttpOnly 同源 cookie 或 `X-Duo-Hub-Token`，拒绝非回环 Host、恶意 Origin 和宽泛 CORS。
+- Antigravity 无头模式拒绝工具动作时，审计元数据会明确列出被拒绝的动作；Duo Hub 不使用 `--dangerously-skip-permissions` 绕过权限。
 - 可取消运行：重置会话会终止当前 provider 进程树；旧 run ID 与 session ID 失效后不能写入新会话或新 outbox。
 
 ## 架构

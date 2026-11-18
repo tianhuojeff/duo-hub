@@ -54,6 +54,28 @@ def _parse_json(stdout: str) -> Mapping[str, Any]:
         return {}
 
 
+def _denied_actions_error(payload: Mapping[str, Any]) -> str:
+    denied = payload.get("denied_actions", [])
+    if not isinstance(denied, list) or not denied:
+        return ""
+    labels: list[str] = []
+    for item in denied:
+        if not isinstance(item, dict):
+            continue
+        action = str(item.get("action", "") or "").strip()
+        display_name = str(item.get("display_name", "") or "").strip()
+        label = action
+        if action and display_name and display_name.lower() != action.lower():
+            label = f"{action} ({display_name})"
+        elif display_name:
+            label = display_name
+        if label and label not in labels:
+            labels.append(label)
+    if not labels:
+        return "Antigravity CLI denied a required headless action"
+    return "Antigravity CLI denied required headless actions: " + ", ".join(labels)
+
+
 class _CliAdapter(AgentAdapter):
     def __init__(
         self,
@@ -257,6 +279,8 @@ class AntigravityCliAdapter(_CliAdapter):
         status = str(payload.get("status", "")).upper()
         output = str(payload.get("response", "") or "").strip()
         error = str(payload.get("error", "") or "").strip()
+        if not output and not error:
+            error = _denied_actions_error(payload)
         if result.returncode != 0 and not error:
             error = (result.stderr or result.stdout or f"exit code {result.returncode}").strip()
         success = result.returncode == 0 and status == "SUCCESS" and bool(output)
